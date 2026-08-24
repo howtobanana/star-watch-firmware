@@ -4,7 +4,7 @@ Firmware einer Wanduhr, deren Zeiger eine leuchtende Klinge ist. Ein
 Schrittmotor dreht sie, ein Hall-Sensor gibt ihr einen absoluten Nullpunkt,
 eine Konstantstromquelle regelt das Licht. Läuft auf einem **ESP32 D1 Mini**.
 
-Version 0.9.2 · [Apache-2.0](LICENSE)
+Version 0.9.3 · [Apache-2.0](LICENSE)
 
 > Dies ist der **Firmware-Teil** eines größeren Projekts. Mechanik, Optik, CAD
 > und Fertigungsunterlagen gehören nicht dazu und werden nicht veröffentlicht.
