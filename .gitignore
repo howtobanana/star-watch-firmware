@@ -1,0 +1,11 @@
+# Bauverzeichnisse
+.pio/
+build/
+
+# Geheimnisse - duerfen nie in dieses Repo
+*.pem
+!*.pub.pem
+zugangsdaten.h
+
+# macOS
+.DS_Store
