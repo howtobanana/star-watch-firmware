@@ -234,7 +234,7 @@ constexpr const char *GERAETETYP = "star-watch";
 /// neue Funktionen.
 ///
 /// 0.x heisst: noch nicht ausgeliefert.
-constexpr const char *FIRMWARE_VERSION = "0.9.3";
+constexpr const char *FIRMWARE_VERSION = "0.9.5";
 
 // ===========================================================================
 // UPDATES AUS DEM NETZ (AP 3.7.1)
@@ -255,6 +255,16 @@ constexpr const char *FIRMWARE_VERSION = "0.9.3";
 constexpr const char *UPDATE_URL_VORGABE =
     "https://raw.githubusercontent.com/howtobanana/star-watch-firmware/main/"
     "updates/manifest.json";
+
+/// DIE ALTE ADRESSE, die auf das PRIVATE Repo zeigte und dort immer 404
+/// lieferte. Sie steht auf jedem Geraet im NVS, das vor dem 25.08.2026
+/// gelaufen ist - und ein gemerkter Wert gewinnt gegen jede neue Vorgabe.
+/// Eine neue Firmware allein haette das also NICHT geheilt: das Geraet haette
+/// weiter die tote Adresse gefragt. Am 25.08. am Aufbau gesehen, der
+/// Diagnosebericht meldete "Kanal: eigene URL".
+constexpr const char *UPDATE_URL_STILLGELEGT =
+    "https://raw.githubusercontent.com/howtobanana/star-watch/main/"
+    "firmware/updates/manifest.json";
 
 /// Dasselbe fuer den Vorabkanal. Die eigene Uhr steht auf `beta` und zieht
 /// Versuche mit, ausgelieferte Uhren bleiben auf `stabil`.

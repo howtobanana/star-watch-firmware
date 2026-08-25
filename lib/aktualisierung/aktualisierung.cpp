@@ -116,6 +116,14 @@ void Aktualisierung::beginn(const char *version) {
   url_ = nvs.getString(K_URL, g::UPDATE_URL_VORGABE).c_str();
   if (url_.empty())
     url_ = g::UPDATE_URL_VORGABE;
+  // EINMALIGE UMSTELLUNG: die alte Adresse zeigte ins private Repo und lieferte
+  // dort immer 404. Wer sie gemerkt hat, faende nie wieder ein Update - der
+  // gemerkte Wert gewinnt ja gegen die Vorgabe. Nur DIESE eine Adresse wird
+  // ersetzt; eine selbst gesetzte URL bleibt unangetastet.
+  if (url_ == g::UPDATE_URL_STILLGELEGT) {
+    url_ = g::UPDATE_URL_VORGABE;
+    nvs.putString(K_URL, url_.c_str());
+  }
 
   // Laeuft dieses Image auf Bewaehrung? Dann darf es sich NICHT sofort
   // bestaetigen - siehe Kopf der Datei.

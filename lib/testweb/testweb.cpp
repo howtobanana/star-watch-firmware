@@ -174,6 +174,18 @@ summary{color:var(--d);font-size:12px;cursor:pointer}
 </style></head><body>
 <div class="top"><h1>Star Watch <span style="color:var(--d);font-weight:400">&mdash; Pr&uuml;fstand</span></h1>
 <div class="net" id="net">&nbsp;</div></div>
+<div id="sperre" style="display:none;background:#2a1616;border:1px solid #6b2f2f;
+ border-radius:9px;padding:10px 12px;margin-bottom:10px">
+<b style="color:var(--f)">Keine Berechtigung &mdash; Token fehlt</b>
+<p class="hint" style="margin-top:4px">Die Anzeige l&auml;uft weiter, aber <b>jede Bedienung
+wird abgewiesen</b>. Diese Uhr verlangt seit AP&nbsp;1.3 ein Token je Ger&auml;t. Der Browser
+merkt es sich pro Adresse &mdash; wer die Uhr vorher &uuml;ber einen anderen Namen oder eine
+andere IP ge&ouml;ffnet hat, steht ohne da.</p>
+<div class="row"><input id="sperrf" placeholder="Token einf&uuml;gen" style="width:230px">
+<button class="p" onclick="sperreSetzen()">merken</button>
+<button id="sperrb" style="display:none" onclick="tokAusLog()">aus dem Log holen</button></div>
+<p class="hint" id="sperrm">Es steht im Ger&auml;teblatt.</p>
+</div>
 <div id="neu" style="display:none;background:#16301f;border:1px solid #2f6b45;
  border-radius:9px;padding:10px 12px;margin-bottom:10px">
 <b style="color:var(--o)">Im Heimnetz erreichbar</b><br>
@@ -460,7 +472,26 @@ let tok = localStorage.getItem('sw_tok') || '';
 function kopf(){return tok?{'X-Starwatch-Token':tok}:{}}
 function hol(pfad,opt){opt=opt||{};opt.headers=Object.assign({},opt.headers||{},kopf());
  return fetch(pfad,opt).then(r=>{if(r.status===401)tokFehlt();return r})}
-function tokFehlt(){$('tokm').textContent='Abgewiesen - Token fehlt oder stimmt nicht.'}
+// EIN 401 MUSS MAN SEHEN (25.08.2026). Vorher faerbte er nur einen Hinweis in
+// einer ZUGEKLAPPTEN Karte - die Uhr sah dann aus wie haengend, nicht wie
+// gesperrt. Das hat einmal einen ganzen Abend gekostet.
+function tokFehlt(){$('sperre').style.display='block';
+ $('tokm').textContent='Abgewiesen - Token fehlt oder stimmt nicht.'}
+function sperreSetzen(){const w=v('sperrf');if(!w)return;
+ tok=w;localStorage.setItem('sw_tok',tok);
+ $('sperrm').textContent='Gemerkt. Wird ab jetzt mitgeschickt.';
+ $('sperre').style.display='none';blatt_holen();z()}
+// SELBSTHILFE, NUR IN DER ENTWICKLUNGSFASSUNG: dort schreibt die Uhr ihr
+// Geraeteblatt in den Ringpuffer, und /test/log ist offen. Bei der
+// Auslieferung steht es dort NICHT - deshalb bleibt der Knopf dann verborgen,
+// statt einen Weg anzubieten, den es nicht gibt.
+function tokAusLog(){fetch('/test/log').then(r=>r.text()).then(x=>{
+ const m=x.match(/Zugriffstoken\s+(\S+)/);
+ if(!m){$('sperrm').textContent='Nicht im Log - vermutlich aus dem Ringpuffer '+
+  'gerollt. Einmal Strom aus und an (NICHT fuenfmal), dann erneut.';return}
+ $('sperrf').value=m[1];sperreSetzen();
+ $('sperrm').textContent='Aus dem Log geholt und gemerkt.'})
+ .catch(()=>{$('sperrm').textContent='Log nicht erreichbar.'})}
 function tokSetzen(){tok=v('tokf');localStorage.setItem('sw_tok',tok);
  $('tokm').textContent='Gemerkt. Wird ab jetzt mitgeschickt.';blatt_holen()}
 function tokLoeschen(){tok='';localStorage.removeItem('sw_tok');
@@ -621,6 +652,8 @@ function wlan(){const n=$('wn').value;
   .catch(()=>{$('ns').textContent='Verbindung hierher beendet - siehe serielle Ausgabe'})}
 function z(){fetch('/test/zustand').then(r=>r.json()).then(d=>{
  $('net').textContent=d.netz;
+ // Den Selbsthilfe-Knopf gibt es nur, wo er auch etwas findet.
+ if(d.entw) $('sperrb').style.display='inline-block';
  const r=[['Uhrzeit',d.uhr+'  ('+d.modus+')'],['Zeitquelle',d.zeitquelle],['Zeiger','Schritt '+d.pos+'  &rarr; '+d.blatt+' auf dem Blatt  &rarr; zeigt '+d.zeigt],
   ['Ziel',d.ziel+(d.faehrt?'  F&Auml;HRT':'  steht')],['F&uuml;hrung',d.fuehrung],
   ['Abweichung',d.drift],['Endstufe',d.endstufe],['Referenz','<span class="'+kl(d.homing)+'">'+d.homing+'</span>'],
@@ -990,6 +1023,7 @@ String Testweb::zustand_json() {
   s += "\"homing\":\"" +
        json_text(hominggrund_text(betrieb_->letztes_homing().grund)) + "\",";
   s += "\"offset\":" + String(betrieb_->hall_offset()) + ",";
+  s += "\"entw\":" + String(g::ENTWICKLUNGSGERAET ? "true" : "false") + ",";
   s += "\"d0\":\"" + String(hall_->magnet_erkannt() ? "MAGNET" : "frei") + "\",";
   s += "\"a0\":\"" + String(hall_->spannung_gefiltert(), 3) + "\",";
   s += "\"ruhe\":\"" + String(hall_->ruhe_v(), 3) + "\",";
@@ -1069,9 +1103,20 @@ void Testweb::ota_einrichten() {
   // ein. In der ENTWICKLUNGSfassung muss es dort trotzdem stehen, sonst kommt
   // niemand mehr per OTA an ein Geraet, das nur ueber VPN erreichbar ist.
   Serial.printf("OTA steht (Passwort '%s').\n", betrieb_->ota_passwort().c_str());
-  if (g::ENTWICKLUNGSGERAET)
+  if (g::ENTWICKLUNGSGERAET) {
     konsole.printf("OTA steht (Passwort '%s'). Log ueber Netz auf Port %u.\n",
                    betrieb_->ota_passwort().c_str(), LOG_PORT);
+    // WARUM HIER UND NICHT NUR BEIM START (25.08.2026): der Ringpuffer fasst
+    // 4096 Zeichen. Das Blatt stand einmal beim Start darin und war nach
+    // Stunden Betrieb herausgerollt - genau in dem Moment, als es gebraucht
+    // wurde, weil der Browser das Token verloren hatte. `ota_einrichten()`
+    // laeuft bei JEDER Verbindung, also steht es nach jedem Netzwechsel und
+    // jedem Wiederverbinden wieder da. Kostet ein paar Zeilen Puffer und ist
+    // der einzige Weg zurueck an ein Geraet, an dem kein Kabel haengt.
+    konsole.printf("\n--- GERAETEBLATT - AUFSCHREIBEN ---\n%s"
+                   "-----------------------------------\n",
+                   betrieb_->geraeteblatt().c_str());
+  }
   else
     konsole.printf("OTA steht (Passwort im Geraeteblatt). Log ueber Netz auf Port %u.\n",
                    LOG_PORT);
