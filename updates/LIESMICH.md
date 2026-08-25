@@ -70,6 +70,13 @@ Version wie `1.0.1-beta1`.
 
 **7. Im öffentlichen Repo committen und pushen.**
 
+> **`raw.githubusercontent.com` speichert rund fünf Minuten zwischen.** Direkt
+> nach dem Push liefert es noch das alte Manifest — am 25.08.2026 gemessen:
+> das Repo zeigte bereits 0.9.3, die URL noch 0.9.2. Wer gleich danach `yp`
+> auf der Uhr auslöst, sieht das Alte und hält es für einen Fehler. Fünf
+> Minuten warten, oder mit `git show origin/main:updates/manifest.json`
+> nachsehen, was wirklich im Repo liegt.
+
 ---
 
 ## Welche Uhr welchen Kanal liest
