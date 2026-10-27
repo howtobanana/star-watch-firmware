@@ -1064,6 +1064,22 @@ au&szlig;erhalb des DHCP-Bereichs des Routers liegen.</p></div>
 Assistant das Zusatzprogramm Mosquitto. Das Passwortfeld <b>leer lassen
 hei&szlig;t unver&auml;ndert</b>; es wird nie zur&uuml;ckgegeben.</p></div>
 
+<div class="k" id="k_fw"><h2>Firmware</h2>
+<div class="kopf"><div class="lage"><span id="fw_jetzt">&mdash;</span></div></div>
+<div class="row"><span class="sl"><span class="kz"><span class="lb">Kanal</span></span>
+<select id="fw_kanal" onchange="c('yk '+this.value)">
+<option value="s">stabil</option>
+<option value="b">beta &middot; Vorabfassungen</option>
+<option value="e" disabled>eigene Adresse</option></select></span></div>
+<div class="row"><span class="sl"><span class="kz"><span class="lb">Updates</span></span>
+<select id="fw_modus" onchange="c('y '+this.value)">
+<option value="0">aus</option>
+<option value="1">nur von Hand</option>
+<option value="2">automatisch, nachts</option></select></span></div>
+<div class="row"><span class="grp"><button onclick="fwSuchen()">Nach Update suchen</button>
+<button class="p" id="fw_ein" style="display:none" onclick="fwEinspielen()">Jetzt aktualisieren</button></span></div>
+<p class="hint" id="fw_m">&mdash;</p></div>
+
 <div class="k"><h2>Ger&auml;t</h2>
 <div class="row hoch"><label>Name</label><span class="grp">
 <input id="al" maxlength="24" placeholder="z. B. Wohnzimmer" oninput="al_beruehrt=true"
@@ -1454,6 +1470,23 @@ function blatt_holen(){
  }).catch(()=>{$('gb_blatt').textContent='nicht abrufbar'});
 }
 
+// FIRMWARE (27.10.2026). Suchen und Einspielen sind die Konsolenkommandos
+// 'yp' und 'yi' - die Uhr antwortet sofort und arbeitet danach; das Ergebnis
+// steht im Zustand (upd). Waehrend des Ladens schweigt der Webserver
+// (ruhe_hook), danach startet die Uhr neu - den Rest zeigt der Wartekasten.
+// Die Suche blockiert den Webserver, bis sie fertig ist - der naechste
+// Zustand traegt also schon ihr Ergebnis.
+function fwSuchen(){$('fw_m').textContent='Sehe nach \u2026';c('yp')}
+function fwEinspielen(){const n=$('fw_ein').dataset.v||'';
+ if(!confirm('Auf '+n+' aktualisieren? Die Uhr steht dabei rund eine Minute, startet neu und macht ein Homing.'))return;
+ $('fw_ein').style.display='none';
+ $('fw_m').textContent='L\u00e4dt '+n+' \u2026 Die Seite ist so lange still, danach startet die Uhr neu.';c('yi')}
+function fwZeigen(d){const u=d.upd;if(!u)return;
+ $('fw_jetzt').textContent='Firmware '+d.fw+(u.bewaehrung?' \u00b7 auf Bew\u00e4hrung':'');
+ stelle('fw_kanal',e=>e.value=u.kanal);stelle('fw_modus',e=>e.value=String(u.modus));
+ const bereit=u.stand===2;$('fw_ein').style.display=bereit?'':'none';
+ $('fw_ein').dataset.v=u.neu;$('fw_ein').textContent=bereit?'Jetzt auf '+u.neu+' aktualisieren':'Jetzt aktualisieren';
+ $('fw_m').textContent=u.meldung||(u.stand===0?'Noch nicht gesucht.':'\u2014')}
 function neustart(){
  if(!confirm('Neustart? Die Uhr braucht danach ein Homing.')) return;
  post('/test/neustart').then(r=>r.text()).then(t=>{$('impm').textContent=t});
@@ -1814,6 +1847,7 @@ function z(){fetch('/test/zustand').then(r=>r.json()).then(d=>{
  // sprang der Regler auf den Wert der vorigen Antwort zurueck, bevor der
  // neue angekommen ist.
  if(/^#[0-9a-f]{6}$/i.test(d.weiss||'')) weissSetzen(d.weiss.slice(1).toLowerCase());
+ fwZeigen(d);
  if(Date.now()>fa_bis && /^#[0-9a-f]{6}$/i.test(d.farbe||''))
   farbAnzeigen(d.farbe.slice(1),true);
  // MELDUNG: sichtbar, solange eine steht - mit dem Knopf, der sie beendet.
@@ -2420,6 +2454,17 @@ String Testweb::zustand_json() {
     // Das Zifferblatt malt danach; `farbe` bleibt der eingestellte Wert.
     snprintf(farbe, sizeof(farbe), "#%06lx", (unsigned long)licht_->zeige_farbe());
     s += "\"zeige_farbe\":\"" + String(farbe) + "\",";
+    // FIRMWARE-KARTE (27.10.2026): Modus, Kanal und Ergebnis der letzten
+    // Suche - als Zahlen und Woerter, damit die Seite nichts zerlegen muss.
+    if (aktiv_update_ != nullptr) {
+      const Updatekanal k = aktiv_update_->kanal();
+      s += "\"upd\":{\"modus\":" + String(static_cast<int>(aktiv_update_->modus())) +
+           ",\"kanal\":\"" + String(k == Updatekanal::beta ? "b" : (k == Updatekanal::stabil ? "s" : "e")) +
+           "\",\"stand\":" + String(static_cast<int>(aktiv_update_->stand())) +
+           ",\"neu\":\"" + json_text(aktiv_update_->gefundene_version().c_str()) +
+           "\",\"meldung\":\"" + json_text(aktiv_update_->meldung().c_str()) +
+           "\",\"bewaehrung\":" + String(aktiv_update_->auf_bewaehrung() ? "true" : "false") + "},";
+    }
     // Weiss DIESER Uhr ('lw') - fuer den Weiss-Knopf und die App.
     if (betrieb_zeiger != nullptr) {
       snprintf(farbe, sizeof(farbe), "#%06lx", (unsigned long)betrieb_zeiger->weiss());

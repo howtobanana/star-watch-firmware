@@ -310,7 +310,7 @@ constexpr const char *GERAETETYP = "star-watch";
 /// neue Funktionen.
 ///
 /// 0.x heisst: noch nicht ausgeliefert.
-constexpr const char *FIRMWARE_VERSION = "0.28.0";
+constexpr const char *FIRMWARE_VERSION = "0.29.0";
 
 // ===========================================================================
 // UPDATES AUS DEM NETZ (AP 3.7.1)
