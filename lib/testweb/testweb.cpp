@@ -435,7 +435,10 @@ button.gruen,button.gruen .tr{color:var(--ok);border-color:var(--ok)}
 button.an{color:var(--w1);border-color:var(--w1);box-shadow:var(--gl);text-shadow:var(--gl)}
 /* Dateiknopf: das native <input type=file> bringt eine eigene Flaeche und
    Schrift mit und laesst sich nicht formen - also versteckt, Label davor. */
-.dat{display:inline-block;border:1px solid var(--w4);padding:var(--s2) var(--s3);
+/* MITTIG WIE EIN KNOPF (27.10.2026): ein Label richtet seinen Text sonst
+   links oben aus - "Waehlen" sass zwischen Export und Import schief. */
+.dat{display:inline-flex;align-items:center;justify-content:center;text-align:center;
+ box-sizing:border-box;border:1px solid var(--w4);padding:var(--s2) var(--s3);
  font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--w2);
  cursor:pointer;transition:color .12s,border-color .12s,box-shadow .12s}
 .dat:hover{color:var(--w1);border-color:var(--w1);box-shadow:var(--gl)}
