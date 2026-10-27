@@ -368,11 +368,23 @@ bool Aktualisierung::image_laden(const std::string &bild_url, size_t groesse,
     ~Freigabe() { if (f != nullptr) f(false); }
   } freigabe{ruhe_};   // gibt AUCH bei jedem vorzeitigen return frei
 
+  // ERST DIE PARTITION, DANN DIE VERBINDUNG (27.10.2026). Update.begin()
+  // legt einen 4-KB-Puffer an; bei offener TLS-Verbindung war dafuer an BE40
+  // kein Speicher mehr frei ("kleinster je 1 KB"), und die Meldung hiess
+  // irrefuehrend "Kein Platz fuer das Image".
+  if (!Update.begin(groesse)) {
+    meldung_ = std::string("Update nicht begonnen: ") + Update.errorString() +
+               " (frei " + std::to_string(ESP.getFreeHeap() / 1024) + " KB, Image " +
+               std::to_string(groesse / 1024) + " KB).";
+    Update.abort();
+    return false;
+  }
   WiFiClientSecure tls;
   tls_vorbereiten(tls);
   HTTPClient http;
   if (!http.begin(tls, bild_url.c_str())) {
     meldung_ = "Image-URL nicht brauchbar.";
+    Update.abort();
     return false;
   }
   http.setTimeout(20000);
@@ -380,16 +392,13 @@ bool Aktualisierung::image_laden(const std::string &bild_url, size_t groesse,
   if (code != HTTP_CODE_OK) {
     meldung_ = "Image nicht erreichbar (HTTP " + std::to_string(code) + ")";
     http.end();
+    Update.abort();
     return false;
   }
   if (http.getSize() > 0 && (size_t)http.getSize() != groesse) {
     meldung_ = "Groesse passt nicht zum Manifest.";
     http.end();
-    return false;
-  }
-  if (!Update.begin(groesse)) {
-    meldung_ = "Kein Platz fuer das Image.";
-    http.end();
+    Update.abort();
     return false;
   }
 
