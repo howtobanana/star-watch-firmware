@@ -1174,7 +1174,10 @@ Regelung &uuml;berschwingt.</p></details></div>
 alles &uuml;ber die Konsole. <b>?</b> zeigt die Liste.</p>
 </div>
 
-<div class="k" style="grid-column:1/-1"><h2>Log</h2><pre id="log">&mdash;</pre></div>
+<div class="k" style="grid-column:1/-1"><h2>Log</h2><pre id="log">&mdash;</pre>
+<div class="row"><span class="grp"><button onclick="logKopieren()">Kopieren</button>
+<button onclick="logLaden()">Herunterladen</button></span></div>
+<p class="hint" id="logm">Solange im Log etwas markiert ist, h&auml;lt es an.</p></div>
 
 </div></details></div>
 
@@ -1949,12 +1952,28 @@ function wartemodus(){
    })},2500);
 }
 
-function lg(){fetch('/test/log').then(r=>r.text()).then(x=>{const p=$('log');
+// MARKIEREN, KOPIEREN, LADEN (27.10.2026). Bis dahin schrieb lg() das Log
+// alle 1,5 s neu - jede Markierung war weg, bevor man kopieren konnte.
+// Jetzt: nur bei neuem Inhalt, und nie, solange darin markiert ist.
+// Kopieren ohne navigator.clipboard: das gibt es nur in sicheren Kontexten,
+// und die Uhr spricht http.
+let log_text='';
+function logMarkiert(){const a=getSelection();return a&&!a.isCollapsed&&$('log').contains(a.anchorNode)}
+function lg(){fetch('/test/log').then(r=>r.text()).then(x=>{log_text=x;const p=$('log');
+ if(logMarkiert()||p.textContent===(x||' '))return;
  const u=p.scrollTop+p.clientHeight>=p.scrollHeight-24;p.textContent=x||' ';if(u)p.scrollTop=p.scrollHeight})
  // Waehrend eines Neustarts scheitert das im 1,5-s-Takt. Ohne dieses catch
  // waere jeder Fehlschlag eine unbehandelte Ablehnung - das Log meldet den
  // Ausfall ohnehin nicht, dafuer ist z() da.
  .catch(()=>{})}
+function logKopieren(){const t=document.createElement('textarea');t.value=log_text||$('log').textContent;
+ t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);t.select();
+ let ok=false;try{ok=document.execCommand('copy')}catch(e){}t.remove();
+ $('logm').textContent=ok?'Kopiert.':'Kopieren ging nicht \u2013 Herunterladen nehmen.'}
+function logLaden(){const a=document.createElement('a');
+ a.href=URL.createObjectURL(new Blob([log_text||$('log').textContent],{type:'text/plain'}));
+ a.download='starwatch-log-'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')+'.txt';
+ document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 reiter(localStorage.getItem('sw_reiter')||'bed');
 z();lg();setInterval(z,1000);setInterval(lg,1500);
 </script></body></html>)HTML";
