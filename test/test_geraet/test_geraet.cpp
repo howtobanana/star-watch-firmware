@@ -83,12 +83,53 @@ void test_rueckzug_ist_gross_genug_fuer_ein_plausibles_fenster() {
                    static_cast<int32_t>(1.0f / g::GRAD_JE_SCHRITT));
 }
 
-void test_aussteuerungsfenster_liegt_innerhalb_der_versorgung() {
-  // Der SS49E laeuft an 3,3 V, seine Ruhelinie liegt in der Mitte. Eine
-  // Auslenkung groesser als die halbe Versorgung ist physikalisch nicht
-  // messbar - die Kurve waere dann abgeschnitten.
-  TEST_ASSERT_TRUE(g::HALL_SPANNE_MAX_V < g::HALL_RUHE_V);
-  TEST_ASSERT_TRUE(g::HALL_SPANNE_MIN_V > 0.0f);
+void test_aussteuerungsfenster_liegt_im_messbereich() {
+  // Frueher: der SS49E lief an 3,3 V, und eine Auslenkung groesser als die
+  // halbe Versorgung war physikalisch nicht messbar. Jetzt ist die
+  // Grenze der Messbereich des TMAG5273 - darueber ist die Feldkurve
+  // abgeschnitten, und ein abgeschnittener Gipfel hat keinen Schwerpunkt.
+  TEST_ASSERT_TRUE(g::HALL_SPANNE_MAX_MT < g::TMAG_BEREICH_MT);
+  TEST_ASSERT_TRUE(g::HALL_SPANNE_MIN_MT > 0.0f);
+  TEST_ASSERT_TRUE(g::HALL_SPANNE_MIN_MT < g::HALL_SPANNE_MAX_MT);
+}
+
+void test_grobschwelle_liegt_ueber_dem_erdfeld() {
+  // Rund 0,05 mT hat das Erdfeld. Eine Grobsuche, die darauf anspringt,
+  // bleibt an einer beliebigen Stelle stehen - und der Rueckzug rechnet
+  // dann von einem Ort, an dem kein Magnet ist.
+  TEST_ASSERT_TRUE(g::HALL_GROB_SCHWELLE_MT > 0.2f);
+  TEST_ASSERT_TRUE(g::HALL_GROB_SCHWELLE_MT < g::HALL_SPANNE_MIN_MT);
+}
+
+void test_der_messbereich_gehoert_zu_einer_wirklichen_variante() {
+  // Der TMAG5273 kennt genau vier Bereiche. Steht hier etwas anderes, ist
+  // eine Zahl getippt statt aus dem Datenblatt genommen.
+  const bool bekannt = g::TMAG_BEREICH_MT == 40.0f || g::TMAG_BEREICH_MT == 80.0f ||
+                       g::TMAG_BEREICH_MT == 133.0f || g::TMAG_BEREICH_MT == 266.0f;
+  TEST_ASSERT_TRUE(bekannt);
+}
+
+void test_die_nachtschwellen_haben_hysterese() {
+  // Ohne Abstand zwischen den beiden Schwellen schaltet die Klinge in der
+  // Daemmerung im Minutentakt.
+  TEST_ASSERT_TRUE(g::LUX_NACHT_AUS < g::LUX_NACHT_AN);
+  TEST_ASSERT_TRUE(g::LUX_NACHT_AUS > 0.0f);
+  TEST_ASSERT_TRUE(g::LUX_NACHT_AN <= g::LUX_HELL);
+}
+
+void test_die_lux_spanne_ist_logarithmierbar() {
+  TEST_ASSERT_TRUE(g::LUX_DUNKEL > 0.0f);
+  TEST_ASSERT_TRUE(g::LUX_HELL > g::LUX_DUNKEL);
+  TEST_ASSERT_TRUE(g::LUX_ANTEIL_MIN > 0.0f && g::LUX_ANTEIL_MIN <= 1.0f);
+}
+
+void test_lux_aufloesung_trifft_die_groesste_messbare_helligkeit() {
+  // Probe auf die eine Zahl, die aus dem Datenblatt kommt: bei x1/8 und
+  // 25 ms ist die Aufloesung 32 * 16 mal so grob wie bei x2 und 800 ms.
+  // Mal 65535 Zaehlschritten muss das die 140 000 lx ergeben, die Vishay
+  // als groesste messbare Beleuchtungsstaerke nennt.
+  const float grob = g::LUX_AUFLOESUNG_BASIS * 32.0f * 16.0f;
+  TEST_ASSERT_FLOAT_WITHIN(2000.0f, 140000.0f, grob * 65535.0f);
 }
 
 void test_haltestrom_ist_nie_null() {
@@ -101,6 +142,68 @@ void test_haltestrom_ist_nie_null() {
 
 void test_led_untergrenze_ist_ein_prozentwert() {
   TEST_ASSERT_TRUE(g::LED_MIN_PROZENT >= 0.0f && g::LED_MIN_PROZENT < 100.0f);
+}
+
+// --- Treiberstrom gegen R_SENSE (Arbeitsliste Firmware-Port 2.3 und 8) ----
+
+/// Strom in mA RMS bei Stromstufe CS, nach der Formel, die TMCStepper selbst
+/// benutzt: (CS+1)/32 * 0,325 V / (sqrt2 * (R_SENSE + 0,02 Ohm)).
+static float strom_bei_cs(int cs) {
+  return (cs + 1) / 32.0f * 0.325f / (std::sqrt(2.0f) * (g::R_SENSE + 0.02f)) *
+         1000.0f;
+}
+
+/// Stromstufe fuer einen Wunschstrom, GENAU wie TMCStepper 0.7.3 sie
+/// rechnet (TMCStepper.cpp, rms_current): abgeschnitten, nicht gerundet.
+/// 400 mA an 0,47 Ohm ergeben so CS 26 = 396 mA, nicht CS 27.
+static int cs_fuer(float ma) {
+  return static_cast<int>(32.0f * 1.41421f * ma / 1000.0f * (g::R_SENSE + 0.02f) /
+                              0.325f -
+                          1.0f);
+}
+
+void test_laufstrom_liegt_mit_abstand_unter_dem_vollausschlag() {
+  // Faellt dieser Test, gibt R_SENSE den Laufstrom nicht her: der Treiber
+  // klemmt dann still auf CS 31, und der Motor bekommt weniger als verlangt.
+  TEST_ASSERT_TRUE(static_cast<float>(g::STROM_LAUF) <= 0.9f * strom_bei_cs(31));
+}
+
+void test_strom_liegt_im_fenster_des_datenblatts() {
+  // TMC2209 Datenblatt S. 25: "normal IRUN is 16 to 31 for best microstep
+  // performance" - das Fenster gilt fuer den LAUFstrom. Der Haltestrom ist
+  // seit 01.10.2026 150 mA (CS 9, an C4E8 gemessen, geraet.h); fuer IHOLD
+  // nennt das Datenblatt kein Fenster.
+  TEST_ASSERT_EQUAL_INT(26, cs_fuer(g::STROM_LAUF));
+  TEST_ASSERT_EQUAL_INT(9, cs_fuer(g::STROM_HALT));
+}
+
+// --- Waermegrenze der RGB-LED (Vorgabe 25.09.2026, 27.10.2026 auf 95 %) -----------------------
+
+void test_die_led_bekommt_nie_mehr_als_95_prozent_ihrer_drei_watt() {
+  // Jede Farbe, die es gibt, bei 100 % am Regler: nie ueber 2,85 W. Geprueft
+  // an allen Ecken des Farbwuerfels - dort liegt das Maximum.
+  const uint32_t ecken[] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00,
+                            0xFF00FF, 0x00FFFF, 0xFFFFFF};
+  for (uint32_t f : ecken) {
+    float k[3];
+    const float w = starwatch::kanal_anteile(
+        starwatch::tastverhaeltnis(100.0f, g::LED_MIN_PROZENT), f,
+        g::LED_WATT_VOLL, g::LED_MAX_W, k);
+    TEST_ASSERT_TRUE(w <= 0.95f * 3.0f + 1e-4f);
+    float echt = 0.0f;
+    for (int i = 0; i < 3; i++)
+      echt += k[i] * g::LED_WATT_VOLL[i];
+    TEST_ASSERT_TRUE(echt <= 0.95f * 3.0f + 1e-4f);
+  }
+}
+
+void test_rot_bei_hundert_prozent_ist_volle_leistung() {
+  // "100 % Rot sind unter 1 W" - also volle 100 %, keine Drosselung.
+  float k[3];
+  const float w = starwatch::kanal_anteile(1.0f, 0xFF0000, g::LED_WATT_VOLL,
+                                           g::LED_MAX_W, k);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, k[0]);
+  TEST_ASSERT_TRUE(w < 1.0f);
 }
 
 int main(int, char **) {
@@ -117,9 +220,18 @@ int main(int, char **) {
   RUN_TEST(test_der_tag_laeuft_zweimal_durch);
 
   RUN_TEST(test_rueckzug_ist_gross_genug_fuer_ein_plausibles_fenster);
-  RUN_TEST(test_aussteuerungsfenster_liegt_innerhalb_der_versorgung);
+  RUN_TEST(test_aussteuerungsfenster_liegt_im_messbereich);
+  RUN_TEST(test_grobschwelle_liegt_ueber_dem_erdfeld);
+  RUN_TEST(test_der_messbereich_gehoert_zu_einer_wirklichen_variante);
+  RUN_TEST(test_die_nachtschwellen_haben_hysterese);
+  RUN_TEST(test_die_lux_spanne_ist_logarithmierbar);
+  RUN_TEST(test_lux_aufloesung_trifft_die_groesste_messbare_helligkeit);
   RUN_TEST(test_haltestrom_ist_nie_null);
   RUN_TEST(test_led_untergrenze_ist_ein_prozentwert);
 
+  RUN_TEST(test_laufstrom_liegt_mit_abstand_unter_dem_vollausschlag);
+  RUN_TEST(test_strom_liegt_im_fenster_des_datenblatts);
+  RUN_TEST(test_die_led_bekommt_nie_mehr_als_95_prozent_ihrer_drei_watt);
+  RUN_TEST(test_rot_bei_hundert_prozent_ist_volle_leistung);
   return UNITY_END();
 }

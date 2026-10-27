@@ -44,6 +44,7 @@
 #include <antrieb.h>
 #include <betrieb.h>
 #include <hall.h>
+#include <lux.h>
 #include <licht.h>
 #include <aktualisierung.h>
 
@@ -82,6 +83,11 @@ using Kommandofn = void (*)(char *zeile);
 
 class Testweb {
  public:
+  /// Sendeleistung fuer diesen Start zuruecknehmen - VOR beginn() rufen.
+  /// setup() tut das nach einem Brownout: siehe SENDELEISTUNG in testweb.cpp.
+  static void funk_drosseln();
+  static bool funk_gedrosselt();
+
   /// WLAN aufbauen und den Webserver starten.
   ///
   /// Sucht das in `zugangsdaten.h` eingetragene Netz. Fehlt die Datei oder
@@ -92,7 +98,7 @@ class Testweb {
   ///
   /// Gibt false zurueck, wenn beides misslingt. Der Rest der Firmware laeuft
   /// dann trotzdem weiter - ueber die serielle Konsole.
-  bool beginn(Antrieb *antrieb, Hall *hall, Licht *licht, Betrieb *betrieb,
+  bool beginn(Antrieb *antrieb, Hall *hall, Licht *licht, Lux *lux, Betrieb *betrieb,
               Kommandofn kommando);
 
   /// Aus der Hauptschleife aufrufen.
@@ -116,6 +122,23 @@ class Testweb {
 
   bool verbunden() const { return verbunden_; }
   bool eigener_ap() const { return eigener_ap_; }
+
+  /// Laeuft der Zugangspunkt OHNE Schluessel?
+  ///
+  /// Das unterscheidet die beiden Faelle, in denen die Uhr ein eigenes Netz
+  /// aufspannt, und sie sind NICHT dasselbe:
+  ///
+  ///   offen      - es sind noch gar keine WLAN-Zugangsdaten bekannt. Die Uhr
+  ///                ist im Auslieferungszustand, es gibt nichts zu schuetzen,
+  ///                und ein Schluessel, den niemand kennen kann, sperrt nur
+  ///                den Besitzer aus. Dort ist AUSSCHLIESSLICH die
+  ///                WLAN-Einrichtung frei - kein Motor, kein Licht, kein
+  ///                Geraeteblatt, kein Update.
+  ///   gesichert  - Zugangsdaten sind bekannt, das Netz ist nur gerade nicht
+  ///                erreichbar. Das ist der Rettungsweg, und dort gilt wie
+  ///                bisher: wer den Schluessel aus dem Geraeteblatt hat, darf
+  ///                alles.
+  bool offener_ap() const { return offener_ap_; }
   String adresse() const;
 
   /// Der Zustand als JSON fuer `/test/zustand`. Oeffentlich, weil die
@@ -185,11 +208,35 @@ class Testweb {
   /// Gibt die Anzahl zurueck.
   int netze_suchen();
 
-  /// Zugangsdaten speichern und verbinden. Ein leeres `ssid` loescht sie.
+  /// Adresse im Heimnetz: DHCP oder fest (26.09.2026).
+  struct Adresswahl {
+    bool fest = false;
+    String ip, maske, gw, dns;  ///< dns leer = Gateway
+  };
+
+  /// Prueft eine feste Adresse, BEVOR irgendetwas gespeichert wird: gueltige
+  /// Adressen, lueckenlose Maske, IP und Gateway im selben Netz, keine Netz-
+  /// oder Rundrufadresse. `fehler` sagt, was nicht stimmt.
+  static bool adresse_pruefen(const Adresswahl &a, String *fehler);
+
+  /// Zugangsdaten (und optional die Adresse) speichern und verbinden. Ein
+  /// leeres `ssid` loescht beides.
+  ///
+  /// SCHEITERT DIE VERBINDUNG, KOMMT DER ALTE STAND ZURUECK - und aus dem
+  /// Heimnetz heraus auch gleich die alte Verbindung.
   ///
   /// Das PASSWORT wird nie ins Log geschrieben - der Ringpuffer ist ueber die
   /// Weboberflaeche abrufbar, und ein WLAN-Passwort hat dort nichts zu suchen.
-  bool wlan_setzen(const String &ssid, const String &passwort);
+  bool wlan_setzen(const String &ssid, const String &passwort,
+                   const Adresswahl *adresse = nullptr);
+
+  /// Gespeichertes Passwort - NUR fuer "gleiches Netz, nur die Adresse
+  /// aendern", damit niemand dafuer das WLAN-Passwort neu tippen muss. Geht
+  /// nie ueber eine Route oder ins Log hinaus.
+  String gespeichertes_passwort() const;
+
+  /// Gespeicherte Adresseinstellung.
+  Adresswahl gespeicherte_adresse() const;
 
   /// Gespeicherte SSID, oder leer. Das Passwort gibt es NICHT als Getter.
   String gespeicherte_ssid() const;
@@ -230,6 +277,12 @@ class Testweb {
 
  private:
   void ota_einrichten();
+
+ public:
+  /// Waehrend eines Updates niemanden bedienen - siehe update_laeuft.
+  static void stumm(bool an);
+
+ private:
   void log_tick();
   void dns_starten();
   void dns_beenden();
@@ -240,6 +293,8 @@ class Testweb {
   Aktualisierung *aktiv_update_ = nullptr;
   Antrieb *antrieb_ = nullptr;
   Hall *hall_ = nullptr;
+  Lux *lux_ = nullptr;
+  bool offener_ap_ = false;
   Licht *licht_ = nullptr;
   Betrieb *betrieb_ = nullptr;
   Kommandofn kommando_ = nullptr;

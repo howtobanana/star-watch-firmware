@@ -26,13 +26,19 @@ VERFAHREN
 Signiert wird NICHT das Image direkt, sondern ein kleiner Textblock, der den
 Hash des Images UND die Version enthaelt:
 
-    starwatch-fw-1
+    starwatch-fw-3
     version=<semver>
     groesse=<bytes>
     sha256=<hex>
     mindest=<semver>
 
 Signatur = ECDSA mit P-256 ueber SHA-256 dieses Blocks, als DER, base64.
+
+DAS SCHEMA IST DIE HARDWARE-PRUEFUNG (seit 28.09.2026, fw-3). Die Alphas
+B und E teilten Schluessel und Verfahren mit der heutigen Uhr; fw-1 (B) und
+fw-2 (mit einer Platinenzeile im Block) gehoeren ihnen. Ein E-Image auf
+diesem Brett faengt der Bootloader nicht ab - beide sind C3. Die Alphas
+kennen fw-3 nicht und weisen es ab, die heutige Uhr nimmt nur fw-3.
 
 Zwei Gruende fuer den Umweg ueber den Block statt einer Signatur ueber das
 Image:
@@ -63,7 +69,8 @@ BENUTZUNG
     ./signieren.py schluessel                       einmalig, erzeugt das Paar
     ./signieren.py header  fw-signaturschluessel.pub.pem [zweiter.pub.pem]
     ./signieren.py manifest  firmware.bin  1.4.2  https://…/fw-1.4.2.bin \\
-                   --schluessel fw-signaturschluessel.pem  --mindest 1.0.0
+                   --schluessel fw-signaturschluessel.pem \\
+                   --mindest 1.0.0
     ./signieren.py pruefen  manifest.json  firmware.bin  fw-…pub.pem
 
 Der letzte Aufruf macht genau das, was die Uhr macht - damit laesst sich das
@@ -80,7 +87,9 @@ import subprocess
 import sys
 import tempfile
 
-SCHEMA = "starwatch-fw-1"
+# MUSS gleich dem Schema in aktualisierung.cpp (manifest_pruefen) sein -
+# sonst nimmt keine Uhr das Update an.
+SCHEMA = "starwatch-fw-3"
 KURVE = "prime256v1"  # NIST P-256, im Arduino-Core als
                       # CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED verfuegbar
 
@@ -109,13 +118,16 @@ def semver(s: str) -> tuple[int, int, int]:
     return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
 
 
-def block_bauen(version: str, groesse: int, sha256_hex: str, mindest: str) -> bytes:
+def block_bauen(version: str, groesse: int, sha256_hex: str,
+                mindest: str) -> bytes:
     """Der signierte Block. Genau diese Bytefolge - kein JSON, keine
     Kanonisierung, keine Ueberraschung. Die Firmware baut sie identisch
-    zusammen und prueft die Signatur darueber."""
+    zusammen und prueft die Signatur darueber (aktualisierung.cpp,
+    manifest_pruefen)."""
     semver(version)
     semver(mindest)
-    return (f"{SCHEMA}\n"
+    kopf = f"{SCHEMA}\n"
+    return (kopf +
             f"version={version}\n"
             f"groesse={groesse}\n"
             f"sha256={sha256_hex}\n"
@@ -220,7 +232,8 @@ def cmd_pruefen(a: argparse.Namespace) -> None:
     fehler: list[str] = []
 
     if m.get("schema") != SCHEMA:
-        fehler.append(f"fremdes Schema '{m.get('schema')}', erwartet '{SCHEMA}'")
+        fehler.append(f"fremdes Schema '{m.get('schema')}', erwartet '{SCHEMA}'"
+                      " - die Uhr wuerde das Update abweisen")
 
     sha, groesse = sha256_datei(pathlib.Path(a.image))
     if m.get("sha256") != sha:
@@ -247,7 +260,8 @@ def cmd_pruefen(a: argparse.Namespace) -> None:
         for f in fehler:
             print(f"  - {f}")
         sys.exit(1)
-    print(f"OK. Version {m['version']}, {m['groesse']} Bytes, Signatur gueltig.")
+    print(f"OK. Version {m['version']}, "
+          f"{m['groesse']} Bytes, Signatur gueltig.")
     print(f"Die Uhr wuerde dieses Image einspielen, wenn ihre laufende Version")
     print(f"mindestens {m['mindest']} ist und kleiner als {m['version']}.")
 

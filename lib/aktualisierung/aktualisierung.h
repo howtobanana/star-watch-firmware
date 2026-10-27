@@ -101,6 +101,17 @@ class Aktualisierung {
   /// @param version die laufende Firmware-Version (semver).
   void beginn(const char *version);
 
+  /// Wird gerufen, wenn das Laden beginnt (true) und wenn es endet (false).
+  /// Damit kann der Aufrufer alles andere stilllegen, was am Netz haengt.
+  ///
+  /// WARUM DAS NOETIG IST, am Geraet gemessen: eine offene Weboberflaeche
+  /// fragt im Sekundentakt ab, und jede Anfrage belegt Socket und Speicher
+  /// neben dem Update-Strom. Beim Entwickler-OTA brach die Uebertragung
+  /// dreimal hintereinander ab; mit geschlossener Seite lief sie auf Anhieb
+  /// durch. Das Produkt-Update laedt 1,3 MB - dort waere es dasselbe, nur
+  /// nachts und unbemerkt.
+  void ruhe_hook(void (*f)(bool)) { ruhe_ = f; }
+
   /// Aus der Hauptschleife. Uebernimmt das taegliche Pruefen und das
   /// Bestaetigen eines frisch eingespielten Images.
   ///
@@ -163,6 +174,7 @@ class Aktualisierung {
   std::string sha_soll_;
   size_t groesse_ = 0;
 
+  void (*ruhe_)(bool) = nullptr;
   bool auf_bewaehrung_ = false;
   uint32_t start_ms_ = 0;
   uint32_t letzte_pruefung_ms_ = 0;

@@ -1,10 +1,10 @@
 {
-  "schema": "starwatch-fw-1",
-  "version": "0.9.5",
-  "groesse": 1335072,
-  "sha256": "35e3a68bf52e73a4d3c79b72e7c6661a4ddd79259d118c0c68bc97c0b8edffac",
+  "schema": "starwatch-fw-3",
+  "version": "0.28.0",
+  "groesse": 1908912,
+  "sha256": "7ef9e5473daefe947447fbddbf544749ee261405e971c5a351485fe3e39627ac",
   "mindest": "0.9.0",
   "kanal": "stabil",
-  "url": "https://raw.githubusercontent.com/howtobanana/star-watch-firmware/main/updates/firmware-0.9.5.bin",
-  "signatur": "MEUCIQCunbSXiOUnuZrJizRhaoYGu7OMeuMy4KUd+A3t4+bO/AIgalYhTeC8uxePyZJ/VtkYr+fPvsR7GpYQx5dblIqRTGM="
+  "url": "https://raw.githubusercontent.com/howtobanana/star-watch-firmware/main/updates/firmware-0.28.0.bin",
+  "signatur": "MEUCIFLj05bX5P3L99LVqzHBR5HOB/eRGvleYlu2lbmS+jclAiEA5997sZe1XALN0UVXg+E4mUkyvOWWanu2lMdLcCtezkA="
 }

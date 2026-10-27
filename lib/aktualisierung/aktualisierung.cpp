@@ -124,6 +124,10 @@ void Aktualisierung::beginn(const char *version) {
     url_ = g::UPDATE_URL_VORGABE;
     nvs.putString(K_URL, url_.c_str());
   }
+  // Ebenso die Manifestnamen bis 0.18.0 - beta bleibt dabei beta.
+  if (update_url_umstellen(&url_, g::UPDATE_ORDNER, g::UPDATE_URL_VORGABE,
+                           g::UPDATE_URL_BETA))
+    nvs.putString(K_URL, url_.c_str());
 
   // Laeuft dieses Image auf Bewaehrung? Dann darf es sich NICHT sofort
   // bestaetigen - siehe Kopf der Datei.
@@ -288,10 +292,21 @@ bool Aktualisierung::manifest_pruefen(const std::string &roh) {
 
   std::string schema, version, sha, mindest, sig, bild;
   long groesse = 0;
-  if (!json_text(q, "schema", &schema) || schema != "starwatch-fw-1") {
+  if (!json_text(q, "schema", &schema)) {
     meldung_ = "Fremdes oder fehlendes Schema - kein Star-Watch-Manifest.";
     return false;
   }
+
+  // NUR SCHEMA fw-3 (28.09.2026). Das Schema IST die Hardware-Pruefung: fw-1
+  // (Alpha B) und fw-2 (Alphas, mit einer Platinenzeile im Block) teilten
+  // Schluessel und Verfahren mit dieser Uhr, und ein E-Image auf diesem Brett
+  // faengt der Bootloader nicht ab - beide sind C3. Die Alphas kennen fw-3
+  // nicht und weisen es ab; diese Uhr weist alles andere ab.
+  if (schema != "starwatch-fw-3") {
+    meldung_ = "Fremdes Schema '" + schema + "' - fuer diese Uhr nicht zulaessig.";
+    return false;
+  }
+  const std::string kopf = "starwatch-fw-3\n";
   if (!json_text(q, "version", &version) || !json_text(q, "sha256", &sha) ||
       !json_text(q, "mindest", &mindest) || !json_text(q, "signatur", &sig) ||
       !json_text(q, "url", &bild) || !json_zahl(q, "groesse", &groesse)) {
@@ -301,8 +316,7 @@ bool Aktualisierung::manifest_pruefen(const std::string &roh) {
 
   // DEN BLOCK GENAU SO ZUSAMMENSETZEN wie werkzeuge/signieren.py -
   // Byte fuer Byte, kein JSON, keine Kanonisierung.
-  const std::string block = std::string("starwatch-fw-1\n") + "version=" +
-                            version + "\n" + "groesse=" +
+  const std::string block = kopf + "version=" + version + "\n" + "groesse=" +
                             std::to_string(groesse) + "\n" + "sha256=" + sha +
                             "\n" + "mindest=" + mindest + "\n";
   if (!signatur_pruefen(block, sig))
@@ -346,6 +360,14 @@ bool Aktualisierung::pruefen() {
 
 bool Aktualisierung::image_laden(const std::string &bild_url, size_t groesse,
                                  const std::string &sha_soll) {
+  // Alles andere am Netz stilllegen, solange geladen wird - siehe ruhe_hook().
+  if (ruhe_ != nullptr)
+    ruhe_(true);
+  struct Freigabe {
+    void (*f)(bool);
+    ~Freigabe() { if (f != nullptr) f(false); }
+  } freigabe{ruhe_};   // gibt AUCH bei jedem vorzeitigen return frei
+
   WiFiClientSecure tls;
   tls_vorbereiten(tls);
   HTTPClient http;

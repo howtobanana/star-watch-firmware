@@ -4,7 +4,8 @@
 #include <geraet.h>
 #include <zeiger.h>
 
-#include <utility>  // std::swap
+#include <algorithm>  // std::max
+#include <utility>    // std::swap
 
 namespace starwatch {
 
@@ -28,8 +29,25 @@ constexpr int32_t GROB_RESERVE = 200;
 /// er wird nach vorn verzerrt.
 /// 23.08.2026: 550 deckte die neu gemessenen 520..567 Schritte nicht mehr
 /// ganz ab. 650 tut es wieder, mit derselben Reserve wie der Rueckzug.
-constexpr int32_t FEIN_NACH_FLANKE = 650;
-constexpr int32_t FEIN_WEG = g::HALL_RUECKZUG_SCHRITTE + FEIN_NACH_FLANKE;
+///
+/// 27.09.2026: KEINE FESTE STRECKE MEHR. Die Kurve des TMAG5273 an C4E8 ist
+/// 842 Schritte breit, die Fahrt endete 227 Schritte hinter der Mitte - fuer
+/// die 150 Schritte je Seite der Rechnung blieben 77 Reserve. Die Fahrt endet
+/// jetzt an der Kurve (zeiger.h, Feinfahrtende); dieser Wert ist nur noch die
+/// Obergrenze, falls sie nie wieder unter die Schwelle faellt.
+constexpr int32_t FEIN_NACH_FLANKE = 1400;
+
+/// Wo die Feinfahrt BEGINNT: so weit vor der Flanke der Grobsuche. Bis dahin
+/// faehrt der Zeiger im Grobtempo (27.09.2026). Frueher begann sie am Ende des
+/// Rueckzugs, 650 Schritte vor der Flanke - bei 25 Schritten/s 26 s Anlauf
+/// durch freies Feld. Die Flanke liegt bei rund 5 % der Gipfelhoehe, die
+/// Rechnung beginnt bei 20 %; 250 Schritte davor ist Luft.
+constexpr int32_t FEIN_VORLAUF = 250;
+constexpr int32_t FEIN_WEG = FEIN_VORLAUF + FEIN_NACH_FLANKE;
+
+/// Mindestabstand des Halts hinter dem Gipfel - SCHWERPUNKT_HALBBREITE plus
+/// Reserve, damit die Rechnung beim SCHMALEN Magneten beide Seiten sieht.
+constexpr int32_t FEIN_NACH_GIPFEL = 200;
 
 /// Tempo der Feinanfahrt. Bei 25 Schritten/s und einer Messung alle 20 ms
 /// fallen rund zwei Messpunkte je Schritt an. Weil die Fahrt gleichfoermig
@@ -45,6 +63,19 @@ constexpr int32_t FEIN_WEG = g::HALL_RUECKZUG_SCHRITTE + FEIN_NACH_FLANKE;
 /// laeuft beim Start und einmal taeglich, nicht im Betrieb.
 constexpr uint32_t FEIN_TEMPO = 25;
 constexpr uint32_t FEIN_MESSTAKT_MS = 20;
+
+/// Verzoegerung zwischen Feldwert und Zaehlerstand, in Mikrosekunden.
+///
+/// AM GERAET GEMESSEN, 27.09.2026 (C4E8, TMAG5273): im Wechsel 50 <-> 400
+/// Schritte/s lag der Schwerpunkt bei 400 im Mittel 3,8 Schritte spaeter,
+/// in der Reihe 25/100/200/400/800 ergab sich dieselbe Groessenordnung
+/// (9..16 ms). 3,8 Schritte auf 350 Schritte/s Unterschied sind 11 ms.
+/// Woher genau - Mittelung im Sensor, Positionsmeldung des Antriebs, Last-
+/// winkel des Motors - ist offen; die Wirkung ist ein Versatz proportional
+/// zum Tempo, und der wird hier abgezogen. Damit liefert jede Feinfahrt-
+/// geschwindigkeit dieselbe Mitte, und ein bei 25 Schritten/s eingemessener
+/// Offset bleibt gueltig (Rest 0,25 Schritte).
+constexpr uint32_t FEIN_LATENZ_US = 11000;
 
 /// Hoechstzahl der Messpunkte einer Feinanfahrt.
 ///
@@ -72,7 +103,11 @@ constexpr uint32_t FEIN_MESSTAKT_MS = 20;
 /// verwirft die Feinanfahrt oben bei FEIN_MAX_PUNKTE stillschweigend den REST
 /// des Wegs - also die abfallende Flanke - und der Schwerpunkt wandert nach
 /// vorn. Genau der Fehler, den die Rechnung vermeiden soll.
-constexpr size_t FEIN_MAX_PUNKTE = 3000;
+///
+/// 27.09.2026: 3400, damit die Obergrenze des Wegs (FEIN_WEG = 1650) bei zwei
+/// Punkten je Schritt hineinpasst - der Messtakt richtet sich jetzt nach dem
+/// Tempo (siehe Feinanfahrt). Im Normalfall faellt rund ein Drittel weniger an.
+constexpr size_t FEIN_MAX_PUNKTE = 3400;
 int32_t fein_pos[FEIN_MAX_PUNKTE];
 float fein_wert[FEIN_MAX_PUNKTE];
 
@@ -94,7 +129,12 @@ constexpr int32_t SCHWERPUNKT_HALBBREITE = 150;
 
 /// Messtakt und Mittelung der Spitzenwerterfassung.
 ///
-/// AM GERAET GEMESSEN (22.08.2026): ungetaktet und ohne Mittelung zeigte die
+/// WAS JETZT GILT, STEHT AM ENDE DIESES BLOCKS. Der Absatz davor ist die
+/// Vorgeschichte aus der Zeit der KY-024 und bleibt stehen, weil er den
+/// Grund fuer den Takt erklaert - der Takt gilt weiter, nur aus einem
+/// anderen Grund.
+///
+/// HISTORIE, KY-024 MIT SS49E, AM GERAET GEMESSEN (22.08.2026): ungetaktet und ohne Mittelung zeigte die
 /// Spanne im STILLSTAND 311 bis 383 mV - das Fenster fuer die Aussteuerung
 /// ist 250 bis 550 mV, die Messung waere also unbrauchbar gewesen. Einzelne
 /// Messungen schwanken nur um rund 36 mV; das Problem war, dass tick() bei
@@ -112,24 +152,36 @@ constexpr int32_t SCHWERPUNKT_HALBBREITE = 150;
 /// Ein einzelner Ausreisser bleibt fuer immer darin stehen, egal wie gut der
 /// Rest gemittelt ist. Dagegen hilft nur, den Ausreisser selbst zu entfernen -
 /// deshalb der Median aus drei Mittelwerten.
-constexpr uint32_t TICK_TAKT_MS = 50;   // wie der ADC-Takt des Pruefstands
-constexpr uint8_t TICK_PROBEN = 16;     // Mittelung: Rauschen / sqrt(16) = /4
-constexpr uint8_t TICK_MEDIAN = 3;      // gegen einzelne Ausreisser
+/// SEIT DEM TMAG5273 SIND DIE DREI ZAHLEN KLEIN GEWORDEN, und der Grund
+/// steht im Absatz darueber: das ganze Aufgebot aus Takt, 16 Proben und
+/// Median richtete sich gegen den ESP32-ADC. Der ist nicht mehr beteiligt.
+/// Der TMAG5273 mittelt in Hardware ueber 32 Wandlungen und schickt das
+/// Ergebnis als Zahl - Ausreisser einzelner Wandlungen kommen dort gar nicht
+/// mehr an.
+///
+/// Was BLEIBT, ist der Takt: tick() laeuft in jedem Schleifendurchlauf, und
+/// eine I2C-Uebertragung je Durchlauf waere reine Verschwendung. Bei 100 kHz
+/// kostet ein Lesevorgang ueber sechs Register rund 0,9 ms.
+constexpr uint32_t TICK_TAKT_MS = 50;
+constexpr uint8_t TICK_PROBEN = 4;   // gegen das Rauschen des Sensors selbst
+constexpr uint8_t TICK_MEDIAN = 1;   // Ausreisser gibt es nicht mehr
 
-/// Entprellung von D0.
+/// Entprellung des Schwellenuebergangs.
 ///
-/// AM GERAET GEMESSEN (22.08.2026): im Stillstand zaehlte die Firmware
-/// **16071 Flanken**. Der LM393-Komparator der KY-024 hat keine Hysterese;
-/// liegt das Feld nahe der Poti-Schwelle, kippt sein Ausgang dauernd.
+/// WARUM SIE BLEIBT, OBWOHL DER KOMPARATOR WEG IST: am 22.08.2026 zaehlte
+/// die Firmware im Stillstand 16071 Flanken, weil der LM393 der KY-024 keine
+/// Hysterese hat. Dieses Bauteil gibt es nicht mehr - die Schwelle steht
+/// jetzt in Software und der Wert kommt als Zahl ueber den Bus.
 ///
-/// Der Pruefstand hat dafuer `delayed_off: 10ms` - das fehlte hier, und es
-/// waere teuer geworden: die Grobsuche der Referenzfahrt endet bei der ERSTEN
-/// Flanke. Sie haette also irgendeine Zufallsflanke genommen und den Rueckzug
-/// von einer Stelle aus gerechnet, an der kein Magnet ist.
+/// Der GRUND fuer die Entprellung ist aber ein anderer und gilt weiter: eine
+/// Softwareschwelle ohne Hysterese kippt genauso, wenn das Feld dicht daneben
+/// steht. Und die Grobsuche der Referenzfahrt endet bei der ERSTEN Flanke -
+/// sie naehme also eine Zufallsflanke und rechnete den Rueckzug von einer
+/// Stelle aus, an der kein Magnet ist.
 ///
 /// 10 ms sind bei 800 Schritten/s rund 8 Schritte - fuer die Grobsuche
 /// unerheblich, weil die Genauigkeit ohnehin aus dem Schwerpunkt kommt.
-constexpr uint32_t D0_ENTPRELL_MS = 10;
+constexpr uint32_t SCHWELLE_ENTPRELL_MS = 10;
 
 constexpr uint32_t GROB_TIMEOUT_MS = 120000;
 constexpr uint32_t RUECKZUG_TIMEOUT_MS = 30000;
@@ -140,6 +192,7 @@ const char *hominggrund_text(Hominggrund grund) {
   switch (grund) {
     case Hominggrund::nicht_gelaufen: return "noch nicht gelaufen";
     case Hominggrund::ok:            return "OK";
+    case Hominggrund::kein_sensor:   return "ABBRUCH: TMAG5273 antwortet nicht";
     case Hominggrund::kein_magnet:   return "ABBRUCH: kein Magnet gefunden";
     case Hominggrund::zaehler_steht: return "ABBRUCH: Zaehler bewegt sich nicht";
     case Hominggrund::kein_feld:     return "ABBRUCH: kein Feld gesehen";
@@ -152,44 +205,59 @@ const char *hominggrund_text(Hominggrund grund) {
 // Messen
 // ===========================================================================
 
-void Hall::beginn() {
-  pinMode(g::PIN_HALL_D0, INPUT);  // GPIO34 hat keinen internen Pull-up,
-                                   // der sitzt extern
-  analogReadResolution(12);
-  // 12 dB deckt bis rund 3,1 V ab; die Ruhelinie bei 1,65 V liegt bequem in
-  // der Mitte.
-  analogSetPinAttenuation(g::PIN_HALL_A0, ADC_11db);
+bool Hall::beginn() {
+  // Der INT-Pin wird NICHT ausgewertet (siehe geraet.h). Er bekommt trotzdem
+  // eine Richtung: ein Eingang, der nie gesetzt wird, bleibt sonst im
+  // Zustand, den der Bootvorgang hinterlassen hat.
+  pinMode(g::PIN_HALL_INT, INPUT);  // der Pull-up sitzt auf der Platine:
+                                    // B R3 an GPIO34, F R13 an IO7
 
-  ruhe_v_ = g::HALL_RUHE_V;
+  ruhe_mt_ = g::HALL_RUHE_MT;
   spitzen_ruecksetzen();
+
+  if (!sensor_.beginn()) {
+    letzter_zustand_ = false;
+    return false;
+  }
+
+  gefiltert_mt_ = feld_gemittelt(TICK_PROBEN);
   letzter_zustand_ = magnet_erkannt();
+  return true;
 }
 
 bool Hall::magnet_erkannt() const {
-  const int roh = digitalRead(g::PIN_HALL_D0);
-  return g::D0_AKTIV_HIGH ? (roh == HIGH) : (roh == LOW);
+  // OHNE NEUE MESSUNG. Frueher las diese Funktion den Komparatorausgang -
+  // das war ein digitalRead und kostete nichts. Eine I2C-Uebertragung kostet
+  // etwas, und die Weboberflaeche fragt im Sekundentakt.
+  //
+  // Wer den frischen Zustand braucht, nimmt feld_erkannt().
+  return fabsf(gefiltert_mt_ - ruhe_mt_) > g::HALL_GROB_SCHWELLE_MT;
 }
 
-float Hall::spannung() const {
-  return analogReadMilliVolts(g::PIN_HALL_A0) / 1000.0f;
+float Hall::feld_mt() {
+  return sensor_.betrag_mt();
 }
 
-float Hall::spannung_gemittelt(uint8_t proben) const {
-  if (proben == 0)
-    return spannung();
-  uint32_t summe = 0;
+float Hall::feld_gemittelt(uint8_t proben) {
+  if (proben <= 1)
+    return feld_mt();
+  float summe = 0.0f;
   for (uint8_t i = 0; i < proben; i++)
-    summe += analogReadMilliVolts(g::PIN_HALL_A0);
-  return (summe / static_cast<float>(proben)) / 1000.0f;
+    summe += feld_mt();
+  return summe / static_cast<float>(proben);
 }
 
-float Hall::spannung_robust() const {
-  // Median aus drei Mittelwerten. Drei genuegen: der Median von drei Werten
-  // verwirft den einen Ausreisser, und mehr kostet nur Zeit in der
-  // Hauptschleife (16 Proben sind schon rund 1,6 ms je Mittelwert).
-  float p[TICK_MEDIAN];
-  for (uint8_t i = 0; i < TICK_MEDIAN; i++)
-    p[i] = spannung_gemittelt(TICK_PROBEN);
+float Hall::feld_robust() {
+  // Der Median aus drei Mittelwerten ist mit dem ESP32-ADC entfallen. Was
+  // hier steht, ist ein Mittelwert - und die Funktion behaelt ihren Namen,
+  // weil sechs Aufrufstellen ihn benutzen und "robust" weiterhin stimmt:
+  // sie ist der Wert, den man ANZEIGEN und fuer Spitzenwerte nehmen soll.
+  if (TICK_MEDIAN <= 1)
+    return feld_gemittelt(TICK_PROBEN);
+
+  float p[3];
+  for (uint8_t i = 0; i < 3; i++)
+    p[i] = feld_gemittelt(TICK_PROBEN);
 
   // Sortiernetz fuer drei Werte - kuerzer als jede Schleife.
   if (p[0] > p[1]) std::swap(p[0], p[1]);
@@ -199,8 +267,11 @@ float Hall::spannung_robust() const {
 }
 
 void Hall::spitzen_ruecksetzen() {
-  max_v_ = 0.0f;
-  min_v_ = 3.3f;
+  max_mt_ = 0.0f;
+  // Die Obergrenze ist der Messbereich des Sensors, nicht eine getippte
+  // Zahl: darueber kann kein Messwert liegen, also ist sie der richtige
+  // Startwert fuer eine Minimumsuche.
+  min_mt_ = g::TMAG_BEREICH_MT;
 }
 
 void Hall::zaehler_ruecksetzen() {
@@ -215,13 +286,11 @@ void Hall::zaehler_ruecksetzen() {
   // Fenster 400" da, obwohl gerade zurueckgesetzt worden war.
   flanken_ = 0;
   fenster_schritte_ = 0;
+  fenster_aus_fein_ = false;
 }
 
-bool Hall::feld_erkannt() const {
-  // Die Groesse, die die Grobsuche braucht: liegt ein Feld an, unabhaengig
-  // von jedem Komparator und jedem Poti. Bezug ist die zuletzt gemessene
-  // Ruhelinie - beim ersten Lauf der Startwert aus geraet.h, danach der
-  // gemessene Wert.
+bool Hall::feld_erkannt() {
+  // Die Groesse, die die Grobsuche braucht: liegt ein Feld an?
   //
   // FRISCH GEMESSEN, nicht der gefilterte Wert aus tick(). Der wird nur alle
   // 50 ms erneuert, und bei 800 Schritten/s in der Grobsuche sind das 40
@@ -230,40 +299,46 @@ bool Hall::feld_erkannt() const {
   // den Offset ein; 52 Schritte sind 5,85 Grad und damit 12 Minuten
   // Anzeigefehler.
   //
-  // Acht Proben kosten rund 0,8 ms - bei 800 Schritten/s also 0,6 Schritte.
-  // Das Rauschen liegt damit weit unter der Schwelle von 87 mV.
-  return fabsf(spannung_gemittelt(8) - ruhe_v_) > g::HALL_GROB_SCHWELLE_V;
+  // EINE Messung, nicht vier. Der SS49E brauchte acht Proben gegen das
+  // ADC-Rauschen und kam damit auf 0,8 ms; vier I2C-Zugriffe waeren 3,6 ms
+  // und bei 800 Schritten/s knapp drei Schritte Weg WAEHREND der Messung -
+  // also genau der Fehler, gegen den der ganze Absatz oben argumentiert.
+  //
+  // Eine einzelne Uebertragung kostet 0,9 ms und liefert trotzdem einen
+  // Mittelwert: der TMAG5273 hat ueber 32 Wandlungen gemittelt, bevor der
+  // Wert auf den Bus kam.
+  return fabsf(feld_mt() - ruhe_mt_) > g::HALL_GROB_SCHWELLE_MT;
 }
 
 void Hall::tick(int32_t position) {
-  // Woraus die Flanke gebildet wird:
-  //   - mit Modul: D0, entprellt (der Komparator hat keine Hysterese)
-  //   - ohne Modul: die Feldschwelle auf A0
+  // EINE Messung je Takt, und aus ihr kommt beides: der gefilterte Wert fuer
+  // die Anzeigen UND die Flanke.
   //
-  // Die Fensterbreite bleibt in beiden Faellen eine messbare Groesse; sie
-  // bezieht sich dann eben auf die Softwareschwelle statt auf das Poti - und
-  // ist damit reproduzierbar, was sie vorher nicht war.
-  const bool roh = g::D0_VORHANDEN ? magnet_erkannt() : feld_erkannt();
-  const uint32_t t = millis();
+  // Frueher waren das zwei Quellen - D0 in jedem Schleifendurchlauf, A0 alle
+  // 50 ms. Das ging, weil beide nichts kosteten. Ueber I2C kostet jede
+  // Messung eine Uebertragung, und zwei Quellen waeren zwei davon, die
+  // dasselbe Feld messen.
+  const uint32_t nun = millis();
+  if (nun - letzte_messung_ >= TICK_TAKT_MS) {
+    letzte_messung_ = nun;
+    const float v = feld_robust();
+    gefiltert_mt_ = v;
+    if (v > max_mt_)
+      max_mt_ = v;
+    if (v < min_mt_)
+      min_mt_ = v;
+  }
+
+  // Die Flanke aus dem gerade gefilterten Wert. magnet_erkannt() misst
+  // bewusst nicht selbst - siehe dort.
+  const bool roh = magnet_erkannt();
+  const uint32_t t = nun;
   if (roh != roh_letzter_) {
     roh_letzter_ = roh;
     roh_seit_ = t;
   }
   const bool jetzt =
-      (t - roh_seit_ >= D0_ENTPRELL_MS) ? roh : letzter_zustand_;
-
-  // Der ANALOGE Wert dagegen getaktet, gemittelt und gegen Ausreisser
-  // gesichert, siehe die Konstanten oben.
-  const uint32_t nun = millis();
-  if (nun - letzte_analogmessung_ >= TICK_TAKT_MS) {
-    letzte_analogmessung_ = nun;
-    const float v = spannung_robust();
-    gefiltert_v_ = v;
-    if (v > max_v_)
-      max_v_ = v;
-    if (v < min_v_)
-      min_v_ = v;
-  }
+      (t - roh_seit_ >= SCHWELLE_ENTPRELL_MS) ? roh : letzter_zustand_;
 
   if (jetzt && !letzter_zustand_) {
     // Eintritt in das Sensorfenster. Der Zaehlerstand in diesem Augenblick
@@ -276,8 +351,10 @@ void Hall::tick(int32_t position) {
     // Millisekunden: der Pruefstand misst ms und muss umrechnen, was nur bei
     // bekannter Drehzahl geht. Schritte sind die Groesse, die die
     // Referenzfahrt wirklich braucht.
+    // Nicht ueber die Breite aus der Feinfahrt schreiben - die ist auf den
+    // Schritt genau, diese haengt am 50-ms-Takt (C4E8: 842, dann 1 Schritt).
     const int32_t breite = position - pos_flanke_;
-    if (breite > 0)
+    if (breite > 0 && !fenster_aus_fein_)
       fenster_schritte_ = breite;
   }
   letzter_zustand_ = jetzt;
@@ -302,29 +379,87 @@ bool Hall::warte_bis_ziel(Antrieb &antrieb, uint32_t timeout_ms, Pumpe pumpe) {
   return true;
 }
 
+void Hall::tempi(uint32_t fein, uint32_t grob) {
+  // Grenzen gegen den Vertipper, nicht gegen die Physik: unter 10 dauert
+  // die Feinfahrt ueber zwei Minuten, ueber 800 bleiben bei 3 ms Messtakt
+  // weniger als ein halber Messpunkt je Schritt. Die Grobsuche nicht ueber
+  // das Fahrtempo.
+  if (fein >= 10 && fein <= 800)
+    fein_tempo_ = fein;
+  if (grob >= 200 && grob <= g::TEMPO_FAHRT)
+    grob_tempo_ = grob;
+}
+
 Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe) {
   Homingergebnis e;
   // Ab hier laeuft eine Fahrt: bricht sie an einer unerwarteten Stelle ab,
   // soll NICHT "noch nicht gelaufen" dastehen.
   e.grund = Hominggrund::abgebrochen;
 
+  // OHNE SENSOR GAR NICHT ERST LOSFAHREN. Frueher war das nicht noetig: ein
+  // fehlender KY-024 lieferte einen offenen Eingang, und die Fahrt endete
+  // mit "kein Magnet". Ein fehlender TMAG5273 liefert 0,0 mT - und eine
+  // Feldkurve aus lauter Nullen sieht genauso aus wie ein zu schwacher
+  // Magnet. Eine Umdrehung Suchfahrt spart man sich damit.
+  if (!sensor_.bereit()) {
+    e.grund = Hominggrund::kein_sensor;
+    return e;
+  }
+
+  // ERST STILLSTAND (23.10.2026). Die App schickt 'h' direkt nach dem
+  // Steuern, und dann lief der Zeiger noch mit 2 U/s rueckwaerts: die
+  // Grobsuche sah die Schwelle beim Zurueckrollen (falsche Flanke, Ruhelinie
+  // im Feld - BE40: Ruhe 4,95 mT, Breite 1650, Abw +1087, trotzdem "OK")
+  // oder brach mit "Zaehler bewegt sich nicht" ab. Danach ist ziel() die
+  // Istposition, und die Suche geht eine volle Umdrehung ab hier.
+  antrieb.stopp_mit_rampe();
+  while (antrieb.laeuft()) {
+    if (pumpe != nullptr && !pumpe()) {
+      e.grund = Hominggrund::abgebrochen;
+      return e;
+    }
+    delay(2);
+  }
+
   gesehen_ = false;
   spitzen_ruecksetzen();
 
   // ---------------------------------------------------------------------
-  // 1. Grobsuche: vorwaerts, bis D0 anspricht
+  // 1. Grobsuche: vorwaerts, bis die Feldschwelle erreicht ist
   // ---------------------------------------------------------------------
-  antrieb.tempo(800);
+  antrieb.tempo(grob_tempo_);  // siehe tempi()
   antrieb.fahre_weiter(g::REV + GROB_RESERVE);
 
+  // DIE SCHWELLE GILT GEGEN DAS KLEINSTE BISHER GESEHENE FELD, nicht gegen
+  // eine Ruhelinie (27.09.2026). Die ist nach dem Einschalten noch nicht
+  // gemessen (HALL_RUHE_MT = 0), und C4E8 sieht im freien Feld 0,54 mT -
+  // die halbe Schwelle. Ein Motor, der naeher am Sensor sitzt, und die
+  // Grobsuche stuende sofort still, mitten im freien Feld.
+  //
+  // Das laufende Minimum ist das Grundfeld, sobald der Zeiger einmal freies
+  // Feld gesehen hat. Steht er beim Start im Magnetfeld, sinkt das Minimum
+  // beim Herausfahren mit, und die Flanke kommt beim naechsten Vorbeifahren -
+  // dafuer ist der Weg eine Umdrehung plus GROB_RESERVE lang.
+  //
+  // Und NICHT ueber gesehen_ aus tick(): das haengt an der absoluten Schwelle
+  // und am 50-ms-Takt.
+  // Die Flanke der Grobsuche LOKAL: tick() schreibt pos_flanke_ bei jedem
+  // Eintritt in sein (absolutes, 50-ms-)Fenster neu - auch waehrend des
+  // Bremsens, und dann rechneten Rueckzug und Vorlauf von dort.
+  bool gefunden = false;
+  int32_t flanke = 0;
+  float grund = g::TMAG_BEREICH_MT;
   const uint32_t grob_ab = millis();
-  while (!gesehen_ && !antrieb.ziel_erreicht()) {
+  while (!gefunden && !antrieb.ziel_erreicht()) {
     tick(antrieb.position());
-    // Zusaetzlich zur Flanke aus tick(): die Feldschwelle auf A0. Damit endet
-    // die Grobsuche auch dann, wenn gar kein D0 verdrahtet ist.
-    if (!g::D0_VORHANDEN && feld_erkannt() && !gesehen_) {
+    const float v = feld_mt();  // FRISCH, siehe feld_erkannt()
+    if (v < grund)
+      grund = v;
+    if (v - grund > g::HALL_GROB_SCHWELLE_MT) {
+      gefunden = true;
       gesehen_ = true;
-      pos_flanke_ = antrieb.position();
+      flanke = antrieb.position();
+      pos_flanke_ = flanke;
       flanken_++;
     }
     if (pumpe != nullptr && !pumpe()) {
@@ -347,7 +482,7 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
 
   e.pos_flanke = pos_flanke_;
 
-  if (!gesehen_) {
+  if (!gefunden) {
     e.grund = Hominggrund::kein_magnet;
     return e;
   }
@@ -360,7 +495,7 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   // wie jede spaetere Zielanfahrt. Das Riemenspiel liegt so immer auf
   // derselben Seite.
   // ---------------------------------------------------------------------
-  antrieb.fahre_zu(pos_flanke_ - g::HALL_RUECKZUG_SCHRITTE);
+  antrieb.fahre_zu(flanke - g::HALL_RUECKZUG_SCHRITTE);
   if (!warte_bis_ziel(antrieb, RUECKZUG_TIMEOUT_MS, pumpe)) {
     e.grund = Hominggrund::abgebrochen;
     return e;
@@ -373,8 +508,8 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   // Nulllinie falsch - und mit ihr der ganze Schwerpunkt und der Offset, um
   // den es hier geht.
   // ---------------------------------------------------------------------
-  ruhe_v_ = spannung_robust();
-  e.ruhe_v = ruhe_v_;
+  ruhe_mt_ = feld_robust();
+  e.ruhe_mt = ruhe_mt_;
 
   // ---------------------------------------------------------------------
   // 4. Feinanfahrt: EINE durchgehende langsame Fahrt, dabei messen
@@ -382,28 +517,63 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   size_t punkte = 0;
   spitzen_ruecksetzen();
 
+  // Im Grobtempo bis kurz vor die Flanke - VORWAERTS, damit das Riemenspiel
+  // auf derselben Seite liegt wie bei jeder Zielanfahrt.
+  antrieb.fahre_zu(flanke - FEIN_VORLAUF);
+  if (!warte_bis_ziel(antrieb, RUECKZUG_TIMEOUT_MS, pumpe)) {
+    e.grund = Hominggrund::abgebrochen;
+    return e;
+  }
+
   const int32_t fein_start = antrieb.position();
-  antrieb.tempo(FEIN_TEMPO);
+  antrieb.tempo(fein_tempo_);
   antrieb.fahre_zu(fein_start + FEIN_WEG);
+  Feinfahrtende ende(ruhe_mt_, g::HALL_SCHWELLE_ANTEIL, g::HALL_GROB_SCHWELLE_MT,
+                     FEIN_NACH_GIPFEL);
+  bool haelt = false;
+
+  // BEIM ALTEN TEMPO BLEIBT ALLES WIE ES WAR - vier Lesungen alle 20 ms, damit
+  // eine Messung mit 25 Schritten/s mit den frueheren vergleichbar ist.
+  // SCHNELLER: eine Lesung alle 3 ms. Mehr bringt nichts: der TMAG5273
+  // liefert bei 32-facher Mittelung rund alle 2,5 ms einen neuen Wert (geraet.h,
+  // TMAG_CONV_AVG), vier Lesungen hintereinander sind viermal DERSELBE.
+  // Darueber: ein Takt, der rund ZWEI Punkte je Schritt gibt, nicht unter
+  // 3 ms - so passt der laengste Weg in den Puffer.
+  const bool alt = fein_tempo_ <= FEIN_TEMPO;
+  const uint32_t messtakt =
+      alt ? FEIN_MESSTAKT_MS : std::max<uint32_t>(3, 500 / fein_tempo_);
+  const uint8_t proben = alt ? TICK_PROBEN : 1;
 
   const uint32_t fein_ab = millis();
   uint32_t letzte_messung = 0;
-  while (!antrieb.ziel_erreicht()) {
+  while (haelt ? antrieb.laeuft() : !antrieb.ziel_erreicht()) {
     const uint32_t jetzt = millis();
-    if (jetzt - letzte_messung >= FEIN_MESSTAKT_MS) {
+    if (jetzt - letzte_messung >= messtakt) {
       letzte_messung = jetzt;
       // Gemittelt: der Schwerpunkt gewichtet mit der Auslenkung, und ein
       // Ausreisser zieht ihn an eine Stelle, an der kein Magnet ist.
-      const float v = spannung_gemittelt(TICK_PROBEN);
+      // Die Position VOR und NACH der Uebertragung gemittelt: der Wert
+      // gehoert in die Mitte, nicht ans Ende. Bei 25 Schritten/s gleichgueltig,
+      // bei 400 ist eine Uebertragung mit vier Proben fast ein Schritt.
+      const int32_t p0 = antrieb.position();
+      const float v = feld_gemittelt(proben);
+      const int32_t p = (p0 + antrieb.position()) / 2 -
+                        static_cast<int32_t>(((uint64_t)fein_tempo_ * FEIN_LATENZ_US + 500000u) / 1000000u);
       if (punkte < FEIN_MAX_PUNKTE) {
-        fein_pos[punkte] = antrieb.position();
+        fein_pos[punkte] = p;
         fein_wert[punkte] = v;
         punkte++;
       }
-      if (v > max_v_)
-        max_v_ = v;
-      if (v < min_v_)
-        min_v_ = v;
+      if (!haelt && ende.fertig(p, v)) {
+        // Die Kurve ist durch. Mit Rampe anhalten und weitermessen, bis er
+        // steht - die Punkte schaden nicht, und die Schleife endet mit dem Ziel.
+        haelt = true;
+        antrieb.stopp_mit_rampe();
+      }
+      if (v > max_mt_)
+        max_mt_ = v;
+      if (v < min_mt_)
+        min_mt_ = v;
     }
     tick(antrieb.position());
     if (pumpe != nullptr && !pumpe()) {
@@ -420,7 +590,6 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   antrieb.tempo(800);
 
   const int32_t gefahren = antrieb.position() - fein_start;
-  e.fenster = fenster_schritte_;
 
   // Die Flankenlage aus der LANGSAMEN Fahrt, nicht aus der Grobsuche: dort
   // wird nur alle 2 ms geprueft, bei 800 Schritten/s also alle 1,6 Schritte.
@@ -447,11 +616,11 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   // bekannt. Danach rechnet die host-getestete Funktion.
   float gipfel = 0.0f;
   for (size_t i = 0; i < punkte; i++) {
-    const float ab = fabsf(fein_wert[i] - ruhe_v_);
+    const float ab = fabsf(fein_wert[i] - ruhe_mt_);
     if (ab > gipfel)
       gipfel = ab;
   }
-  e.spanne_v = gipfel;  // die ECHTE Aussteuerung gegen die Ruhelinie
+  e.spanne_mt = gipfel;  // die ECHTE Aussteuerung gegen die Ruhelinie
 
   float mitte = 0.0f;
   const float schwelle = gipfel * g::HALL_SCHWELLE_ANTEIL;
@@ -461,7 +630,7 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   // vertrauenswuerdig, und ein nicht vertrauenswuerdiger Offset ist schlimmer
   // als keiner.
   if (punkte == 0 ||
-      !schwerpunkt_symmetrisch(fein_pos, fein_wert, punkte, ruhe_v_, schwelle,
+      !schwerpunkt_symmetrisch(fein_pos, fein_wert, punkte, ruhe_mt_, schwelle,
                                SCHWERPUNKT_HALBBREITE, &mitte)) {
     e.grund = Hominggrund::kein_feld;
     return e;
@@ -469,6 +638,13 @@ Homingergebnis Hall::referenzfahrt(Antrieb &antrieb, int32_t offset, Pumpe pumpe
   e.punkte = punkte;
 
   e.schwerpunkt = mitte;
+  // Die Breite aus der Feinfahrt - auf den Schritt genau, gegen die gemessene
+  // Ruhelinie. Sie ersetzt die aus tick(), damit auch die Anzeige sie zeigt.
+  e.fenster = feldbreite(fein_pos, fein_wert, punkte, ruhe_mt_, g::HALL_GROB_SCHWELLE_MT);
+  fenster_schritte_ = e.fenster;
+  fenster_aus_fein_ = true;
+  e.fein_von = fein_start - static_cast<int32_t>(lroundf(mitte));
+  e.fein_bis = antrieb.position() - static_cast<int32_t>(lroundf(mitte));
 
   // Der Schwerpunkt liegt im ueberstrichenen Bogen, der Zeiger steht aber am
   // ENDE des Wegs. Die Differenz ist der Nachlauf und wird herausgerechnet -

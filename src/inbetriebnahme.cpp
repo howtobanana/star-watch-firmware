@@ -14,6 +14,9 @@
 #include <FastAccelStepper.h>
 
 #include <geraet.h>
+#include <i2cbus.h>
+#include <lux.h>
+#include <tmag5273.h>
 
 // --- Pins, Treiber- und Antriebsdaten -------------------------------------
 // SEIT AP 2.1 (22.08.2026) KOMMEN SIE AUS lib/geraet/geraet.h und stehen
@@ -37,14 +40,12 @@ constexpr uint8_t PIN_INDEX   = g::PIN_INDEX;
 constexpr uint8_t PIN_STEP    = g::PIN_STEP;
 constexpr uint8_t PIN_DIR     = g::PIN_DIR;
 constexpr uint8_t PIN_EN      = g::PIN_EN;
-constexpr uint8_t PIN_HALL_D0 = g::PIN_HALL_D0;
-constexpr uint8_t PIN_HALL_A0 = g::PIN_HALL_A0;
+// DER HALL-SENSOR HAENGT AM I2C-BUS: ein TMAG5273 an J5. Menue 4 misst
+// deshalb Millitesla - und dafuer alle drei Achsen.
+constexpr uint8_t PIN_HALL_INT = g::PIN_HALL_INT;
 
-// GEDREHT AM 21.08.2026 AM GERAET, gegen die Theorie. Vorher stand hier LOW,
-// mit der Begruendung "das Modul zieht D0 beim Ansprechen nach LOW". Am
-// verbauten KY-024 ist es umgekehrt; im Pruefstand steht deshalb
-// `inverted: false`. Massgeblich ist das Bauteil, nicht das Datenblatt.
-constexpr int D0_AKTIV = g::D0_AKTIV_HIGH ? HIGH : LOW;
+starwatch::Tmag5273 tmag;
+starwatch::Lux lux;
 
 constexpr float    R_SENSE      = g::R_SENSE;
 constexpr uint8_t  TMC_ADDR     = g::TMC_ADDR;
@@ -54,7 +55,9 @@ constexpr uint16_t STROM_HALT   = g::STROM_HALT;
 constexpr uint8_t  TOFF         = g::TOFF;
 constexpr uint16_t VOLLSCHRITTE = (uint16_t)g::VOLLSCHRITTE;
 
-TMC2209Stepper tmc(&Serial2, R_SENSE, TMC_ADDR);
+// Der C3 hat keinen Serial2 - siehe lib/antrieb/antrieb.cpp.
+HardwareSerial &tmc_seriell = Serial1;
+TMC2209Stepper tmc(&tmc_seriell, R_SENSE, TMC_ADDR);
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *motor = nullptr;
 uint16_t mikroschritte = (uint16_t)g::MIKROSCHRITTE;  // gilt erst, wenn Menue 2 lief
@@ -204,70 +207,124 @@ void m3_schritte() {
 }
 
 // --- 4: Hall-Sweep, eine ganze Umdrehung, CSV auf die Konsole -------------
+//
+// DIESES MENUE IST DIE MESSVORSCHRIFT FUER geraet.h. Die vier Schwellen
+// HALL_RUHE_MT, HALL_SPANNE_MIN_MT, HALL_SPANNE_MAX_MT und die daraus
+// gerechnete Grobschwelle stehen dort als GESETZTE Startwerte. Was dieser
+// Sweep ausgibt, sind die gemessenen - und zwar mit dem Magneten, dem
+// Abstand und der Modullage, die diese eine Uhr wirklich hat.
 void m4_hall() {
+  if (!tmag.bereit()) {
+    Serial.printf("Kein Hall-Sensor: %s.\n"
+                  "J5 pruefen - auf der Platine sitzt kein Pull-up, die sitzen\n"
+                  "auf den Modulen. Steckt keines, ist der ganze Bus tot.\n",
+                  starwatch::tmaggrund_text(tmag.grund()));
+    return;
+  }
   warnung();
   const long n  = umdrehung();
   const long hz = zahl("Rate fuer den Sweep in Schritten/s [200]: ", 200);
   if (hz <= 0) { Serial.println("Ungueltig."); return; }
   tempo(hz);
+
   // Briefing 9: steht der Magnet schon im Fenster, erst herausfahren. Danach
   // ist der Anfang des Sweeps garantiert Ruhefeld - das ist die Nulllinie.
+  //
+  // Die Schwelle dafuer kommt aus geraet.h und nicht aus einem Poti. Das ist
+  // der eigentliche Gewinn des Sensorwechsels: dieselbe Zahl, die die
+  // Referenzfahrt benutzt, entscheidet auch hier.
   Serial.println("Fahre aus dem Sensorfenster heraus ...");
-  for (long i = 0; i < n && digitalRead(PIN_HALL_D0) == D0_AKTIV; i++) motor->move(1, true);
+  for (long i = 0; i < n && tmag.betrag_mt() > g::HALL_GROB_SCHWELLE_MT; i++)
+    motor->move(1, true);
   motor->move(4L * mikroschritte, true);   // Sicherheitsabstand
-  // Fuer die Auswertung eine Umdrehung Millivolt im RAM, falls sie hineinpasst.
-  uint16_t *puffer = (n <= 8192) ? (uint16_t *)malloc(n * sizeof(uint16_t)) : nullptr;
+
   long f_erste = -1, f_letzte = -1, fenster = 0;
-  Serial.println("schritt,volt,d0");
+  float gipfel = 0.0f, ruhe = 1e9f;
+  long gipfel_bei = 0;
+
+  Serial.println("schritt,bx_mt,by_mt,bz_mt,betrag_mt,ueber_schwelle");
   for (long i = 0; i < n; i++) {
-    delay(2);                        // Sensor und Komparator beruhigen
-    uint32_t mv = 0;
-    for (uint8_t k = 0; k < 4; k++) mv += analogReadMilliVolts(PIN_HALL_A0);
-    mv /= 4;
-    const int d0 = digitalRead(PIN_HALL_D0);
-    Serial.printf("%ld,%.4f,%d\n", i, mv / 1000.0, d0);
-    if (puffer) puffer[i] = (uint16_t)mv;
-    if (d0 == D0_AKTIV) { if (f_erste < 0) f_erste = i; f_letzte = i; fenster++; }
+    delay(2);                        // dem Sensor eine Wandlung goennen
+    float bx = 0, by = 0, bz = 0;
+    if (!tmag.achsen_mt(&bx, &by, &bz)) {
+      Serial.println("LESEFEHLER am Bus - Sweep abgebrochen.");
+      return;
+    }
+    const float betrag = sqrtf(bx * bx + by * by + bz * bz);
+    const bool ueber = betrag > g::HALL_GROB_SCHWELLE_MT;
+    Serial.printf("%ld,%.3f,%.3f,%.3f,%.3f,%d\n", i, bx, by, bz, betrag, ueber ? 1 : 0);
+
+    if (betrag > gipfel) { gipfel = betrag; gipfel_bei = i; }
+    if (betrag < ruhe) ruhe = betrag;
+    if (ueber) { if (f_erste < 0) f_erste = i; f_letzte = i; fenster++; }
     motor->move(1, true);
   }
+
   Serial.println("--- Auswertung ---");
-  if (fenster == 0)
-    Serial.println("D0 sprach nie an: Magnet zu weit weg, Poti zu unempfindlich, oder\n"
-                   "D0_AKTIV im Sketch hat die falsche Polaritaet.");
-  else
-    Serial.printf("D0-Fenster: %ld Schritte, von %ld bis %ld, Mitte %.1f. Der Rueckzugsweg\n"
-                  "beim Homing muss groesser sein als diese Breite.\n",
-                  fenster, f_erste, f_letzte, (f_erste + f_letzte) / 2.0);
-  if (!puffer) { Serial.println("Umdrehung zu gross fuer die RAM-Auswertung - Sweep mit\n"
-                 "1/16 oder 1/32 fahren, das genuegt fuer Fenster und Schwerpunkt."); return; }
-  // Ruhespannung aus allem AUSSERHALB des Fensters. Nicht mit 1,65 V annehmen.
-  const long a = max(0L, f_erste - 50), b = min(n - 1, f_letzte + 50);
-  uint32_t summe = 0; long anz = 0;
-  for (long i = 0; i < n; i++) if (f_erste < 0 || i < a || i > b) { summe += puffer[i]; anz++; }
-  const long ruhe = anz ? (long)(summe / anz) : puffer[0];
-  // Mit dem BETRAG der Auslenkung rechnen - dann darf der Magnet falsch herum
-  // sitzen, der SS49E ist linear und bipolar.
-  long gipfel = 0, gipfel_i = 0;
-  for (long i = 0; i < n; i++) { const long ab = labs((long)puffer[i] - ruhe);
-                                 if (ab > gipfel) { gipfel = ab; gipfel_i = i; } }
-  // Schwerpunkt der Feldkurve, 20 Prozent Schwelle gegen das ADC-Rauschen.
-  double zaehler = 0, gewicht = 0;
-  for (long i = 0; i < n; i++) { const long w = labs((long)puffer[i] - ruhe) - gipfel / 5;
-                                 if (w > 0) { zaehler += (double)i * w; gewicht += w; } }
-  free(puffer);
-  Serial.printf("Ruhespannung %.4f V, Gipfelhoehe %.4f V bei Schritt %ld\n",
-                ruhe / 1000.0, gipfel / 1000.0, gipfel_i);
-  if (gipfel < 250)      Serial.println("Gipfel <0,25 V: Magnetabstand verringern, der Index waere unsicher.");
-  else if (gipfel > 550) Serial.println("Gipfel >0,55 V: Abstand vergroessern, sonst klippt die Kurve.");
-  else                   Serial.println("Aussteuerung im Fenster 0,25 bis 0,55 V - passt.");
-  if (gewicht > 0) {
-    const double sp = zaehler / gewicht;
-    Serial.printf("Schwerpunkt der Feldkurve bei Schritt %.2f\n", sp);
-    if (f_erste >= 0)
-      Serial.printf("Versatz Fenstermitte -> Schwerpunkt = %.2f Schritte. Das ist der Wert aus\n"
-                    "Briefing 11.1, den der Driftmonitor spaeter braucht.\n",
-                    sp - (f_erste + f_letzte) / 2.0);
+  Serial.printf("Ruhelinie (kleinster Betrag): %.3f mT\n", ruhe);
+  Serial.printf("Gipfel: %.3f mT bei Schritt %ld\n", gipfel, gipfel_bei);
+  Serial.printf("Aussteuerung gegen die Ruhelinie: %.3f mT\n", gipfel - ruhe);
+
+  if (fenster == 0) {
+    Serial.printf("Die Schwelle von %.3f mT wurde NIE ueberschritten: Magnet zu weit\n"
+                  "weg, oder der Sensor sieht ihn nicht. Der Gipfel oben sagt, wie\n"
+                  "nah es war.\n", g::HALL_GROB_SCHWELLE_MT);
+  } else {
+    Serial.printf("Fenster ueber der Schwelle: %ld Schritte, von %ld bis %ld,\n"
+                  "Mitte %.1f. HALL_RUECKZUG_SCHRITTE (%ld) muss GROESSER sein.\n",
+                  fenster, f_erste, f_letzte, (f_erste + f_letzte) / 2.0,
+                  (long)g::HALL_RUECKZUG_SCHRITTE);
+    if (fenster >= g::HALL_RUECKZUG_SCHRITTE)
+      Serial.println("-> ER IST ES NICHT. In geraet.h erhoehen, sonst endet der\n"
+                     "   Rueckzug mitten im Feld und die Ruhelinie wird falsch\n"
+                     "   gemessen. FEIN_NACH_FLANKE und FEIN_MAX_PUNKTE in\n"
+                     "   hall.cpp muessen mitwachsen.");
   }
+
+  Serial.println("\n--- Das gehoert jetzt nach geraet.h ---");
+  Serial.printf("HALL_SPANNE_MIN_MT = %.1ff;   // halbe gemessene Aussteuerung\n",
+                (gipfel - ruhe) / 2.0f);
+  Serial.printf("HALL_SPANNE_MAX_MT = %.1ff;   // doppelte, aber unter %.0f\n",
+                fminf((gipfel - ruhe) * 2.0f, g::TMAG_BEREICH_MT - 1.0f),
+                g::TMAG_BEREICH_MT);
+  Serial.printf("Steht dort bisher:   %.1f / %.1f  (gesetzt, nicht gemessen)\n",
+                g::HALL_SPANNE_MIN_MT, g::HALL_SPANNE_MAX_MT);
+}
+
+// --- 6: Umgebungslicht dauernd anzeigen -----------------------------------
+//
+// AUCH DAS IST EINE MESSVORSCHRIFT. LUX_DUNKEL, LUX_HELL, LUX_NACHT_AUS und
+// LUX_NACHT_AN in geraet.h stammen aus den ueblichen Groessenordnungen der
+// Beleuchtungsstaerke und nicht aus dem Zimmer, in dem diese Uhr haengt.
+// Hier liest man ab, was dort wirklich ankommt: einmal bei Tag, einmal am
+// Abend mit der gewohnten Beleuchtung, einmal nachts.
+void m6_lux() {
+  if (!lux.bereit()) {
+    Serial.printf("Kein Lichtsensor: %s.\n", starwatch::luxgrund_text(lux.grund()));
+    return;
+  }
+  Serial.println("Beleuchtungsstaerke, bis eine Taste kommt.");
+  Serial.println("Der Sensor stellt seine Empfindlichkeit selbst nach - die Stufe\n"
+                 "steht dabei, damit ein Sprung im Wert erklaerbar bleibt.");
+  // NUR BEI EINEM NEUEN WERT AUSGEBEN. lux.tick() misst hoechstens alle
+  // LUX_TAKT_MS; oefter abzufragen liefert denselben Wert noch einmal, und
+  // eine Liste aus lauter gleichen Zeilen sieht aus wie ein haengender
+  // Sensor.
+  long letzter = -1;
+  while (Serial.available() == 0) {
+    lux.tick();
+    if (lux.gemessen() && static_cast<long>(lux.rohwert()) != letzter) {
+      letzter = lux.rohwert();
+      Serial.printf("%9.2f lx   Stufe %u, x%.3f, %u ms, roh %u von 65535\n", lux.lux(),
+                    lux.stufe(), lux.verstaerkung(), lux.integrationszeit_ms(),
+                    lux.rohwert());
+    }
+    delay(100);
+  }
+  while (Serial.available()) Serial.read();
+  Serial.printf("\nIn geraet.h stehen: dimmen von %.1f bis %.0f lx, Nacht aus unter\n"
+                "%.1f lx, wieder an ueber %.1f lx. Alle vier gesetzt, nicht gemessen.\n",
+                g::LUX_DUNKEL, g::LUX_HELL, g::LUX_NACHT_AUS, g::LUX_NACHT_AN);
 }
 
 // --- 5: Dauerlauf fuer den Resonanztest -----------------------------------
@@ -304,19 +361,44 @@ void menue() {
                  " 1  TMC2209 ueber UART ansprechen, IC-Version lesen\n"
                  " 2  Register setzen und zurueckvergleichen (zuerst laufen lassen)\n"
                  " 3  N Schritte fahren, INDEX gegen kommandierte Schritte\n"
-                 " 4  Hall-Sweep ueber eine Umdrehung, CSV schritt,volt,d0\n"
-                 " 5  Dauerlauf fuer den Resonanztest um 1 U/s");
+                 " 4  Hall-Sweep ueber eine Umdrehung, CSV schritt,bx,by,bz,betrag (mT)\n"
+                 " 5  Dauerlauf fuer den Resonanztest um 1 U/s\n"
+                 " 6  Umgebungslicht dauernd anzeigen (VEML7700 an J8)");
   Serial.printf("Stand: 1/%d Mikroschritte, %ld Schritte je Umdrehung\n", mikroschritte, umdrehung());
 }
 
 void setup() {
   Serial.begin(115200);
   delay(400);
-  pinMode(PIN_HALL_D0, INPUT);   // GPIO34 hat keinen internen Pull-up
+  pinMode(PIN_HALL_INT, INPUT);  // Pull-up sitzt auf dem Brett (B: R3, F: R13)
   pinMode(PIN_INDEX, INPUT);
-  analogReadResolution(12);
+
+  // I2C-Bus und die beiden Sensoren daran. Der Suchlauf steht am Anfang,
+  // weil ohne ihn jedes weitere Menue raet.
+  if (!starwatch::i2cbus::beginn()) {
+    Serial.printf("I2C an SDA=GPIO%u / SCL=GPIO%u liess sich nicht einrichten.\n",
+                  g::PIN_SDA, g::PIN_SCL);
+  } else {
+    uint8_t gefunden[8];
+    const size_t nb = starwatch::i2cbus::absuchen(gefunden, sizeof(gefunden));
+    Serial.printf("I2C: %u Teilnehmer\n", (unsigned)nb);
+    for (size_t i = 0; i < nb && i < sizeof(gefunden); i++) {
+      const char *wer = starwatch::i2cbus::name(gefunden[i]);
+      Serial.printf("  0x%02X  %s\n", (unsigned)gefunden[i],
+                    wer != nullptr ? wer : "UNBEKANNT");
+    }
+    if (nb == 0)
+      Serial.println("  Keiner. Die Pull-ups sitzen auf dem Brett (R11/R12) -\n"
+                     "  also Stecker J5 und Ader pruefen.");
+  }
+  Serial.printf("Hall  %s\n", tmag.beginn()
+                    ? "TMAG5273 bereit"
+                    : starwatch::tmaggrund_text(tmag.grund()));
+  Serial.printf("Licht %s\n", lux.beginn()
+                    ? "VEML7700 bereit"
+                    : starwatch::luxgrund_text(lux.grund()));
   attachInterrupt(PIN_INDEX, index_isr, RISING);
-  Serial2.begin(TMC_BAUD, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+  tmc_seriell.begin(TMC_BAUD, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
   // Register VOR der Bestromung setzen. Sonst gilt bis Menue 2 der Werkszustand:
   // I_scale_analog=1, IRUN am Anschlag, Strom nach Trimmpoti.
   register_setzen(mikroschritte);
@@ -327,7 +409,7 @@ void setup() {
                    "Erst die Verdrahtung klaeren, dann laufen lassen.");
   engine.init();
   motor = engine.stepperConnectToPin(PIN_STEP);
-  if (!motor) { Serial.println("FastAccelStepper: GPIO25 nicht nutzbar."); while (true) delay(1000); }
+  if (!motor) { Serial.printf("FastAccelStepper: GPIO%u nicht nutzbar.\n", PIN_STEP); while (true) delay(1000); }
   motor->setDirectionPin(PIN_DIR, g::DIR_HIGH_ZAEHLT_AUFWAERTS);
   motor->setEnablePin(PIN_EN, true);   // true = LOW aktiviert (ENN)
   motor->setAutoEnable(false);
@@ -343,5 +425,6 @@ void loop() {
   else if (w == "3") m3_schritte();
   else if (w == "4") m4_hall();
   else if (w == "5") m5_dauerlauf();
+  else if (w == "6") m6_lux();
   else menue();
 }

@@ -85,6 +85,10 @@ class Antrieb {
   /// aus ihrer Lage - nur zum Messen benutzen, nie im Betrieb.
   void endstufe(bool ein);
   bool endstufe_an() const { return endstufe_an_; }
+  /// Wie oft die Endstufe seit dem Start abgeschaltet wurde. Im Freilauf
+  /// kippt die Klinge, und der Zaehler weiss nichts davon - eine Abweichung
+  /// bei der naechsten Referenzfahrt ist dann KEIN Schrittverlust.
+  uint32_t freilaeufe() const { return freilaeufe_; }
 
   // -------------------------------------------------------------------------
   // Fahren. Alle Positionen sind Mikroschritte, nie Grad.
@@ -93,19 +97,40 @@ class Antrieb {
   void tempo(uint32_t schritte_je_s);
   void rampe(uint32_t beschleunigung, uint32_t bremsung);
 
+  /// Tempo in MILLI-Schritten je Sekunde, und zwar SOFORT - auch auf eine
+  /// laufende Fahrt, ohne neues Ziel. Fuer die gleitende Timerfahrt: ein
+  /// 12-h-Timer braucht 74 mHz, das geht in ganzen Hertz nicht.
+  ///
+  /// Gibt false zurueck, wenn FastAccelStepper den Wert ablehnt - langsamer
+  /// als rund 250 Mio. Ticks je Schritt (15,6 s) geht nicht. Dann ist nichts
+  /// veraendert.
+  bool tempo_mhz(uint32_t milli_hz);
+
   /// Was gerade gilt. Gemerkt statt aus FastAccelStepper zurueckgelesen -
   /// die Bibliothek gibt beides nicht wieder her, und fuer die Anzeige und
   /// die Timer-Mindestdauer muss es abfragbar sein.
   uint32_t tempo() const { return tempo_; }
   uint32_t beschleunigung() const { return beschleunigung_; }
 
-  /// Auf eine absolute Position fahren.
+  /// Auf eine absolute Position fahren - mit der eingestellten Rampe, OHNE
+  /// weichen Einsatz. Fuer Referenzfahrt, Grenzsuche und Prueflaeufe: deren
+  /// Messungen haengen am genauen Bewegungsablauf.
   void fahre_zu(int32_t position);
+
+  /// Auf eine absolute Position fahren, WEICH (28.09.2026) - fuer alles, was
+  /// man an der Wand sieht: Uhrbetrieb, Timer, Handfahrten. Die
+  /// Beschleunigung setzt allmaehlich ein (weicher_einsatz), und kurze
+  /// Spruenge dauern mindestens WEICH_MIN_MS (weiche_beschleunigung) - der
+  /// Zeiger gleitet, statt zu zucken. Die eingestellte Rampe bleibt die
+  /// Obergrenze.
+  void fahre_weich_zu(int32_t position);
 
   /// Um eine Anzahl Schritte weiterfahren, bezogen auf das ZIEL - nicht auf
   /// die Istposition. Laeuft gerade eine Fahrt, wird ihr Ziel weitergedreht
   /// statt sie abzuschneiden; genau so macht es der Uhrbetrieb im Pruefstand.
   void fahre_weiter(int32_t schritte);
+  /// Wie fahre_weiter, aber weich - siehe fahre_weich_zu.
+  void fahre_weich_weiter(int32_t schritte);
 
   int32_t position() const;
   int32_t ziel() const;
@@ -137,6 +162,12 @@ class Antrieb {
   /// Tatsaechlicher Motorstrom in mA RMS, aus dem Chip gerechnet.
   uint16_t strom_ma();
 
+  /// Haltestrom in mA RMS zur Laufzeit setzen (01.10.2026). Er fliesst rund
+  /// um die Uhr - ohne Licht der groesste Verbraucher. Begrenzt auf
+  /// HALTESTROM_MIN..STROM_LAUF; nie 0, sonst kippt die Klinge.
+  void haltestrom(uint16_t ma);
+  uint16_t haltestrom() const { return halt_ma_; }
+
   /// StallGuard-Rohwert. Faellt, wenn der Motor an seine Grenze kommt - bei
   /// der Grenzsuche das interessanteste Signal, weil es den Schrittverlust
   /// ankuendigt, bevor er hoerbar wird.
@@ -153,6 +184,12 @@ class Antrieb {
   /// stealthChop (false) oder spreadCycle (true).
   void spreadcycle(bool ein);
 
+  /// Mikroschrittzaehler des Treibers (MSCNT, 0..1023 in 1/256-Schritten).
+  /// Zaehlt die STEP-Impulse, die WIRKLICH am Chip ankamen - die Differenz zum
+  /// eigenen Zaehler trennt verlorene Impulse von einem rutschenden Rotor
+  /// (27.09.2026). Nur im Stillstand aussagekraeftig.
+  uint16_t mscnt();
+
  private:
   /// Strom aus dem CS-Wert. TMC2209:
   ///   I_rms = (CS+1)/32 * Vfs/(Rsense+0,02) / sqrt(2)
@@ -164,6 +201,7 @@ class Antrieb {
   FastAccelStepperEngine engine_ = FastAccelStepperEngine();
   FastAccelStepper *motor_ = nullptr;
   bool endstufe_an_ = false;
+  uint32_t freilaeufe_ = 0;
 
   // mutable, weil ziel() den abgebrochenen Lauf nachzieht - das ist ein
   // Zwischenspeicher, kein Zustand nach aussen.
@@ -172,6 +210,7 @@ class Antrieb {
 
   uint32_t tempo_ = 0;
   uint32_t beschleunigung_ = 0;
+  uint16_t halt_ma_ = 0;
 };
 
 }  // namespace starwatch

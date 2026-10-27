@@ -7,6 +7,13 @@ manifest.json        Kanal stabil — verschenkte Uhren
 manifest-beta.json   Kanal beta   — die eigene Uhr
 ```
 
+Signiert wird im **Schema `starwatch-fw-3`** (seit 28.09.2026). Das Schema
+ist zugleich die Hardware-Prüfung: die Alpha-Platinen kennen fw-3 nicht und
+weisen es ab, die heutige Uhr nimmt nur fw-3 an. Liegt hier noch ein altes
+Manifest der Alpha B (fw-1), schadet es also nicht — es wird beim nächsten
+Veröffentlichen einfach überschrieben. Eine Uhr, die sich noch einen älteren
+Manifestnamen aus diesem Ordner gemerkt hat, stellt ihn beim Start selbst um.
+
 Die Uhr lädt das darin genannte Image — aber **nur**, wenn die Signatur zu
 einem der zwei öffentlichen Schlüssel passt, die in ihrer Firmware stehen.
 
@@ -60,8 +67,9 @@ erreichbar bleiben:
       --mindest 0.9.0 \
       --aus ../../Star-Watch-Firmware/updates/manifest.json
 
-Für eine Vorabfassung dasselbe mit `--aus …/manifest-beta.json` und einer
-Version wie `1.0.1-beta1`.
+Für eine Vorabfassung dasselbe mit `--aus …/manifest-beta.json`. Die
+Version muss `MAJOR.MINOR.PATCH` sein — `signieren.py` weist Anhängsel wie
+`-beta1` ab.
 
 **6. Gegenprobe** — macht genau das, was die Uhr macht:
 

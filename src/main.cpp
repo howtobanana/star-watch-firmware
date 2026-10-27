@@ -29,6 +29,7 @@
 // ---------------------------------------------------------------------------
 #include <Arduino.h>
 #include <esp_system.h>
+#include <Preferences.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -39,7 +40,14 @@
 #include <betrieb.h>
 #include <geraet.h>
 #include <hall.h>
+#include <i2cbus.h>
+#include <lwip/priv/tcp_priv.h>
+#include <lwip/tcpip.h>
+#include <lux.h>
+#include <WiFi.h>
+#include <einrichtung.h>
 #include <licht.h>
+#include <mqtt.h>
 #include <testweb.h>
 #include <zeiger.h>
 
@@ -47,10 +55,45 @@ namespace g = starwatch::geraet;
 
 starwatch::Antrieb antrieb;
 starwatch::Hall hall;
+starwatch::Lux lux;
+
+// ===========================================================================
+// LICHTAUTOMATIK (VEML7700 an J8)
+// ===========================================================================
+//
+// Zwei Wirkungen aus EINEM Messwert, und beide sind absichtlich getrennt:
+//
+//   1. DIMMEN      - ein Faktor auf den eingestellten Wert, stufenlos.
+//                    licht_anteil() in lib/zeiger, host-getestet.
+//   2. NACHTS AUS  - ein Schalter mit Hysterese und Frist. Nachtschalter in
+//                    lib/zeiger, host-getestet.
+//
+// Warum getrennt: das Dimmen ist eine Kennlinie ohne Gedaechtnis, das
+// Abschalten ein Zustand mit Gedaechtnis. In eine Funktion gelegt haette
+// man einen Zustandsautomaten, der auch noch rechnet - und genau dort sitzen
+// die Fehler, die am Geraet als "flackert manchmal" auftreten.
+//
+// Die Automatik laesst sich abschalten. Ist sie aus oder fehlt der Sensor,
+// steht der Faktor auf 1 und die Klinge folgt allein dem Regler.
+/// Wollte der Benutzer die Klinge an? Aus dem gemerkten Zustand beim Start.
+///
+/// WARUM DAS EXTRA GEMERKT WIRD: `betrieb.beginn()` stellt den gespeicherten
+/// Ein-Zustand wieder her (`betrieb.cpp:188`) - im laufenden Betrieb richtig,
+/// beim Start aber, BEVOR feststeht, ob es eine Referenz gibt. Am 24.09.2026
+/// am Geraet gesehen: `licht_an: true` bei `referenz: FEHLT`. Die Klinge
+/// leuchtete also doch ueber einer unbekannten Zeigerlage - genau das, was
+/// die Aenderung vom Vorabend verhindern sollte.
+bool klinge_wunsch_an = false;
+
+/// Brownouts in Folge - Begruendung in setup(). Ab zwei startet kein WLAN.
+uint32_t brownout_folge = 0;
+
 starwatch::Licht licht;
 starwatch::Betrieb betrieb;
 starwatch::Aktualisierung aktualisierung;
 starwatch::Testweb testweb;
+starwatch::BleEinrichtung ble;
+starwatch::Mqtt mqtt;
 
 // ===========================================================================
 // Konsole. NICHT blockierend - waehrend eine Eingabe aussteht, laufen der
@@ -144,8 +187,11 @@ void hilfe() {
       "  m 0|1|2     Zeitmodus: 0 aus, 1 fliessend, 2 Minutensprung\n"
       "ZEIGER  (jeder Fahrbefehl schaltet den Uhrbetrieb ab, zurueck mit 'm 1')\n"
       "  p <n>       auf Mikroschritt n fahren (vorwaerts)\n"
+      "  ps <n>      Ziel laufend nachschieben - kuerzester Weg, auch\n"
+      "              rueckwaerts. Fuers Steuern von aussen, schweigt dabei\n"
       "  u <ziel>    anfahren: Stunde 0..12 ODER Uhrzeit HH:MM[:SS]\n"
       "              u 12   u 4.5   u 15:00   u 21:30   (24 h aufs Zwoelferblatt)\n"
+      "  uz          auf zwoelf fahren und halten, bis 'o!' bestaetigt\n"
       "  v <n>       um n Schritte verstellen (+/-, auch rueckwaerts)\n"
       "  f <hz>      Fahrtempo in Schritten/s\n"
       "  a <n>       Rampe in Schritten/s^2; ohne Wert nur anzeigen\n"
@@ -156,7 +202,10 @@ void hilfe() {
       "              x 10 12:00 18:00     x 5 12 6     x 20 21:00 3:00\n"
       "  g           Grenzsuche: acht Tempostufen, Nachweis ueber Hall-Flanken\n"
       "ZWOELF EINMESSEN - drei Schritte, in dieser Reihenfolge\n"
-      "  h           1. Referenzfahrt: der Zeiger sucht seine Nulllage\n"
+      "  h           1. Homing: der Zeiger sucht seine Nulllage\n"
+      "  hu          Homing, danach sofort die Uhrzeit (Ende des Steuerns)\n"
+      "  hf [f] [g]  Tempo der Referenzfahrt: Feinfahrt f, Grobsuche g (Schritte/s)\n"
+      "  hv          Homing-Verlauf: Abweichungen und Offsetaenderungen, gespeichert\n"
       "  v <n>       2. auf zwoelf nachstellen, falls er daneben steht\n"
       "  o!          3. \"das ist zwoelf\" - rechnet den Offset selbst aus\n"
       "              danach 'h' zur Kontrolle. Landet er wieder auf zwoelf,\n"
@@ -166,13 +215,25 @@ void hilfe() {
       "TIMER\n"
       "  t <sek>     Timer starten (eine Umdrehung in dieser Zeit)\n"
       "  t-          Timer abbrechen\n"
+      "  tl [0|1]    Laufart: 0 gleitend, 1 Sekundentakt (gespeichert, wirkt sofort)\n"
       "LICHT\n"
       "  l <p>       Helligkeit in Prozent (0 = aus)\n"
       "  la / lo     Klinge an / aus\n"
+      "  lf [farbe]  Farbe der Klinge: lf ff8800, lf 255 136 0 oder lf gelb\n"
+      "  lw [farbe]  Weiss dieser Uhr (gespeichert, ueberlebt Werksreset)\n"
+      "              (zuendet neu und gleitet hinueber; 'lfr' ohne Zuendung)\n"
+      "  lm <farbe> [muster] [dauer_s] [hell]  Meldung: leuchten|pulsieren|blinken\n"
+      "  lm- / lm    Meldung quittieren / anzeigen\n"
+      "  lu [0|1]    Lichtautomatik (dimmen nach Umgebungslicht), gespeichert\n"
+      "  lg <ms> [a|o|z] [h <p>] [f <farbe>]  weich setzen, ab dem gezeigten Wert\n"
+      "              (z = einschalten mit Zuendung)\n"
+      "  lp [h <p>] [f <farbe>]  Puls   lp- [ms] beenden   lp periode <ms>   lp min <%>\n"
+      "  lb <n>      n Blitze (flash)\n"
+      "  lu n [0|1]  Nachtabschaltung  lu min <%>  lu hell <lx>  lu aus <lx>\n"
       "  lz / ll     zuenden / loeschen\n"
       "  ls          Stundeneffekt (60 s auf 100 %)\n"
       "  lr / lt     Rampe 0-20 % / Treppe 0-100 % (Messhilfen AP 0.5)\n"
-      "  w <p>       PWM direkt in Prozent, ohne Kennlinie\n"
+      "  w <p>       PWM direkt in Prozent, ohne Kennlinie (F: mit Leistungsgrenze)\n"
       "MESSEN UND DIAGNOSE\n"
       "  i           Zustand\n"
       "  d           Treiber auslesen (blockiert rund 100 ms am UART)\n"
@@ -183,6 +244,7 @@ void hilfe() {
       "  n           WLAN und Weboberflaeche von Hand starten\n"
       "  nl          erreichbare Netze suchen\n"
       "  ns <ssid> <pass>  Heimnetz merken und verbinden (ohne neu zu flashen)\n"
+      "  ni dhcp | ni <ip> <maske> <gw> [dns]  Adresse im Heimnetz (fest/DHCP)\n"
       "  na          eigenen Zugangspunkt abschalten (nur mit Heimnetz)\n"
       "  nr          Verbindung neu aufbauen (prueft den Ausfallpfad)\n"
       "  nx          gespeicherte Zugangsdaten vergessen\n"
@@ -190,9 +252,15 @@ void hilfe() {
       "  y           Firmware und Updates: Stand, Modus, URL\n"
       "  y 0|1|2     Updates aus / manuell / automatisch (taeglich, nachts)\n"
       "  yp / yi     jetzt nachsehen / gefundene Fassung einspielen\n"
+      "  y!          laufende Fassung von Hand bestaetigen (Pruefstand ohne Hall)\n"
       "  b           Neustart\n"
+      "  ib          I2C-Bus pruefen: Pegel, freitakten, neu suchen\n"
+      "  ih [mA]     Haltestrom zeigen / setzen (gespeichert)\n"
+      "  dn          TCP-Verbindungen der Uhr\n"
       "  b werksreset  Benutzerwerte und WLAN loeschen; Hall-Offset BLEIBT\n"
-      "\nEinstellungen (Tempo, Rampe, Kreise, Zeitmodus, Helligkeit, Offset)\n"
+      "  alias [name|-]  Name der Uhr (Anzeige und Home Assistant), gespeichert\n"
+      "\nEinstellungen (Tempo, Rampe, Kreise, Zeitmodus, Timer-Lauf, Helligkeit,\n"
+      "Offset) "
       "ueberleben den Neustart. Export und Import gehen ueber die Oberflaeche.\n"
       "\nDieselben Kommandos gehen ueber die Test-Weboberflaeche im Browser.\n"
       "Sie ist ein Messgeraet und KEINE API - die entsteht in AP 3.4.");
@@ -287,6 +355,40 @@ void uhr_ging_aus(bool ja) {
     starwatch::konsole.println("Uhrbetrieb dafuer abgeschaltet. Zurueck mit 'm 1'.");
 }
 
+/// Nach einer Referenzfahrt: war die Abweichung ein Verlust? (05.10.2026)
+/// Ganze Perioden sind die Handschrift des Motors (Haltestrom zu klein,
+/// Ueberlast), eine krumme Zahl spricht fuer Riemen, Magnet oder Mechanik.
+void verlust_melden(const char *vorsatz) {
+  if (!betrieb.letztes_homing().ok() || !betrieb.letzte_vergleichbar())
+    return;
+  const starwatch::Verlustbefund b = starwatch::schrittverlust(
+      betrieb.letzte_abweichung(), g::SCHRITTE_JE_PERIODE, g::HOMING_STREUUNG);
+  if (b.periodisch)
+    starwatch::konsole.printf(
+        "%sSCHRITTVERLUST: %+ld Schritte = %+ld ganze Perioden (Rest %+ld) bei\n"
+        "%sHaltestrom %u mA. Der Motor hat seit der letzten Referenz Schritte\n"
+        "%sverloren - 'hv' zeigt den Verlauf.\n",
+        vorsatz, (long)betrieb.letzte_abweichung(), (long)b.perioden, (long)b.rest, vorsatz,
+        (unsigned)antrieb.haltestrom(), vorsatz);
+  else if (b.verlust)
+    starwatch::konsole.printf(
+        "%sABWEICHUNG %+ld Schritte, KEINE ganze Periode (Rest %+ld) - eher\n"
+        "%sRiemen, Magnet oder Mechanik als der Motor. 'hv' zeigt den Verlauf.\n",
+        vorsatz, (long)betrieb.letzte_abweichung(), (long)b.rest, vorsatz);
+}
+
+/// 'hv': die gespeicherten Referenzfahrten und Offsetaenderungen.
+void verlauf_zeigen() {
+  const starwatch::Homingverlauf &v = betrieb.homingverlauf();
+  starwatch::konsole.printf(
+      "Homing-Verlauf, neueste zuerst (%u Eintraege, ueberlebt den Neustart).\n"
+      "Abw = Abweichung zur vorigen Referenz; ganze Perioden (%ld Schritte)\n"
+      "heissen Schrittverlust.\n",
+      (unsigned)v.anzahl(), (long)g::SCHRITTE_JE_PERIODE);
+  for (size_t i = 0; i < v.anzahl(); i++)
+    starwatch::konsole.printf("  %s\n", betrieb.homingeintrag_text(v.neuer(i)).c_str());
+}
+
 void zustand() {
   const int32_t pos = antrieb.position();
   starwatch::konsole.println("\n--- Zustand ---");
@@ -314,7 +416,7 @@ void zustand() {
 
   const char *wer = "niemand";
   switch (betrieb.fuehrung()) {
-    case starwatch::Fuehrung::homing: wer = "Referenzfahrt"; break;
+    case starwatch::Fuehrung::homing: wer = "Homing"; break;
     case starwatch::Fuehrung::hand:   wer = "Hand";          break;
     case starwatch::Fuehrung::timer:  wer = "Timer";         break;
     case starwatch::Fuehrung::uhr:    wer = "Uhrbetrieb";    break;
@@ -326,26 +428,55 @@ void zustand() {
   starwatch::konsole.printf("Referenz     %s\n",
                 starwatch::hominggrund_text(betrieb.letztes_homing().grund));
   if (betrieb.letztes_homing().ok())
-    starwatch::konsole.printf("             Schwerpunkt %.2f, Nachlauf %ld, Spanne %.0f mV\n",
+    starwatch::konsole.printf("             Schwerpunkt %.2f, Nachlauf %ld, Spanne %.2f mT\n",
                   (double)betrieb.letztes_homing().schwerpunkt,
                   (long)betrieb.letztes_homing().nachlauf,
-                  (double)(betrieb.letztes_homing().spanne_v * 1000.0f));
+                  (double)betrieb.letztes_homing().spanne_mt);
+  if (!betrieb.referenz_gueltig())
+    starwatch::konsole.println(
+        "             KEINE GUELTIGE REFERENZ - der Uhrbetrieb ist gesperrt.\n"
+        "             Der Zeiger bleibt stehen, statt eine geratene Zeit zu\n"
+        "             zeigen. Von Hand fahren geht ('u', 'p', 'v'). Mit 'h'\n"
+        "             eine Referenzfahrt starten.");
   starwatch::konsole.printf("Hall-Offset  %ld Schritte\n", (long)betrieb.hall_offset());
 
-  starwatch::konsole.printf("Hall         D0 %s, A0 %.3f V, Ruhe %.3f V, Spanne %.0f mV\n",
-                hall.magnet_erkannt() ? "MAGNET" : "frei", (double)hall.spannung_gefiltert(),
-                (double)hall.ruhe_v(), (double)(hall.spanne_v() * 1000.0f));
+  if (!hall.bereit())
+    starwatch::konsole.printf("Hall         SENSOR FEHLT: %s - ohne ihn kann die Uhr nicht "
+                  "referenzieren\n", starwatch::tmaggrund_text(hall.sensorgrund()));
+  else
+    starwatch::konsole.printf("Hall         %s, Feld %.2f mT, Ruhe %.2f mT, Spanne %.2f mT "
+                  "(TMAG5273 auf 0x%02X)\n",
+                  hall.magnet_erkannt() ? "MAGNET" : "frei", (double)hall.feld_gefiltert(),
+                  (double)hall.ruhe_mt(), (double)hall.spanne_mt(),
+                  (unsigned)hall.sensoradresse());
   starwatch::konsole.printf("             Flanken %lu, Fenster %ld Schritte%s\n",
                 (unsigned long)hall.flanken(), (long)hall.fenster_schritte(),
                 hall.fenster_schritte() == 0 ? " (noch nicht gemessen)" : "");
+
+  if (!lux.bereit())
+    starwatch::konsole.printf("Umgebungslicht  %s - Automatik ohne Wirkung\n",
+                  starwatch::luxgrund_text(lux.grund()));
+  else if (!lux.gemessen())
+    starwatch::konsole.println("Umgebungslicht  VEML7700 da, noch kein Messwert");
+  else
+    starwatch::konsole.printf("Umgebungslicht  %.1f lx (Stufe %u, x%.3f, %u ms, roh %u), "
+                  "Automatik %s, Faktor %.0f %%\n",
+                  (double)lux.lux(), (unsigned)lux.stufe(), (double)lux.verstaerkung(),
+                  (unsigned)lux.integrationszeit_ms(), (unsigned)lux.rohwert(),
+                  betrieb.lichtautomatik().an ? "an" : "aus",
+                  (double)(licht.dimmfaktor() * 100.0f));
 
   starwatch::konsole.printf("Licht        %s, Regler %.0f %%, Ausgabe %.1f %%, Effekt %s\n",
                 licht.ist_an() ? "an" : "aus", (double)licht.soll_prozent(),
                 (double)licht.ausgabe_prozent(),
                 starwatch::effekt_text(licht.effekt()));
-  starwatch::konsole.printf("Timer        %s (Rest %s)\n",
+  starwatch::konsole.printf("Farbe        #%06lX, LED %.2f W von hoechstens %.2f W, %lu Hz\n",
+                              (unsigned long)licht.farbe(), (double)licht.leistung_w(),
+                              (double)g::LED_MAX_W, (unsigned long)g::LED_PWM_HZ);
+  starwatch::konsole.printf("Timer        %s (Rest %s), %s\n",
                 betrieb.timer_zustand_text(),
-                betrieb.timer_restzeit().c_str());
+                betrieb.timer_restzeit().c_str(),
+                starwatch::timerlauf_text(betrieb.timerlauf()));
   if (!betrieb.letztes_homing().ok() && homing_letzter_versuch_ms != 0) {
     const uint32_t frist = homing_fehlschlaege >= g::HOMING_VERSUCHE_KURZ
                                ? g::HOMING_WIEDERHOLUNG_LANG_MS
@@ -375,15 +506,14 @@ void diagnose() {
                                        : "(keine gueltige Antwort)"));
   if (v != 0x21) {
     starwatch::konsole.println(
-        "Keine Antwort. Ursachen in dieser Reihenfolge:\n"
-        " 1 VM fehlt. Ohne Motorspannung schweigt der Treiber, auch wenn VDD\n"
-        "   anliegt. Das ist die haeufigste Ursache.\n"
-        " 2 TX und RX liegen auf ZWEI verschiedenen PDN-Pads. Sie gehoeren auf\n"
-        "   DASSELBE.\n"
-        " 3 1-kOhm-Widerstand in Reihe TX fehlt, oder er sitzt in der RX-Ader.\n"
-        " 4 Adresse. Steht in geraet.h auf 0x00, weil MS1/MS2 unbeschaltet\n"
-        "   sind. Sind sie inzwischen auf 3,3 V gelegt (AP 0.6), gehoert dort\n"
-        "   0x03 hin.");
+        "Keine Antwort. Die Verdrahtung ist Teil des Bretts - es bleiben, in\n"
+        "dieser Reihenfolge:\n"
+        " 1 12 V an J1 fehlen oder F1 hat ausgeloest. VM (U2.22/U2.28) ist\n"
+        "   +12V; ohne Motorspannung schweigt der Treiber.\n"
+        " 2 Loetstelle am U2 (QFN, nur mit der Lupe) oder an R6 (1 kOhm\n"
+        "   zwischen TX_VOR_R und UART). Messpunkte: TP8 = TX, TP9 = UART.\n"
+        " 3 Adresse: MS1/MS2 (U2.9/U2.10) liegen fest auf GND, also 0x00.\n"
+        "   Steht in geraet.h etwas anderes, ist DAS der Fehler.");
     return;
   }
   starwatch::konsole.printf("Zustand      %s\n",
@@ -640,7 +770,7 @@ void kommando(char *z) {
   // der Ersatz fuer die frueher stumme `pumpe()` - siehe dort.
   if (langlauf && k != 's' && k != 'i' && k != '?') {
     starwatch::konsole.printf(
-        "Laeuft gerade (Referenzfahrt, Grenzsuche oder Pendellauf).\n"
+        "Laeuft gerade (Homing, Grenzsuche oder Pendellauf).\n"
         "Jetzt gehen nur 's' (Abbruch), 'i' (Zustand) und '?'. '%c' ignoriert.\n", k);
     return;
   }
@@ -651,10 +781,126 @@ void kommando(char *z) {
       return;
 
     case 'i':
+      if (z[1] == 'h') {
+        // ih [mA]: Haltestrom zeigen oder setzen (01.10.2026). Er fliesst
+        // rund um die Uhr; die Verluste im Motor wachsen mit dem Quadrat.
+        const char *arg = z + 2;
+        while (*arg == ' ')
+          arg++;
+        if (*arg != '\0') {
+          const long ma = atol(arg);
+          if (ma <= 0) {
+            starwatch::konsole.printf("ih <%u..%u mA>\n", (unsigned)g::HALTESTROM_MIN,
+                                      (unsigned)g::STROM_LAUF);
+            return;
+          }
+          betrieb.haltestrom_setzen(static_cast<uint16_t>(ma));
+        }
+        starwatch::konsole.printf("Haltestrom %u mA (Lauf %u mA), gemeldet %u mA.\n",
+                                  (unsigned)antrieb.haltestrom(), (unsigned)g::STROM_LAUF,
+                                  (unsigned)antrieb.strom_ma());
+        return;
+      }
+      if (z[1] == 'b') {
+        // ib: I2C-Bus pruefen, freitakten, neu absuchen, Sensoren neu anmelden.
+        bool sda = false, scl = false, sda2 = false;
+        starwatch::i2cbus::pruefen(&sda, &scl, &sda2);
+        starwatch::konsole.printf("I2C-Pegel    SDA %s, SCL %s (GPIO%u/%u, Pull-ups R11/R12)\n",
+                                  sda ? "hoch" : "TIEF", scl ? "hoch" : "TIEF",
+                                  g::PIN_SDA, g::PIN_SCL);
+        if (!sda || !scl)
+          starwatch::konsole.printf(
+              "             %s\n",
+              !scl ? "SCL tief: Masseschluss an SCL, Stecker verdreht oder Ader gequetscht."
+                   : (sda2 ? "SDA hing - nach 9 Takten frei. Ein Baustein hatte den Bus gehalten."
+                           : "SDA bleibt tief: Masseschluss an SDA oder Stecker verdreht."));
+        uint8_t gefunden[8];
+        const size_t n = starwatch::i2cbus::absuchen(gefunden, sizeof(gefunden));
+        starwatch::konsole.printf("I2C-Bus      %u Teilnehmer\n", (unsigned)n);
+        for (size_t i = 0; i < n && i < sizeof(gefunden); i++) {
+          const char *wer = starwatch::i2cbus::name(gefunden[i]);
+          starwatch::konsole.printf("             0x%02X  %s\n", (unsigned)gefunden[i],
+                                    wer != nullptr ? wer : "UNBEKANNT");
+        }
+        if (n == 0 && sda && scl)
+          starwatch::konsole.println(
+              "             Leitungen frei, aber niemand antwortet: die Sensoren\n"
+              "             bekommen keine Versorgung (3V3/GND an J5/J8) oder die\n"
+              "             Stecker sitzen nicht.");
+        const bool h = hall.beginn();
+        const bool l = lux.beginn();
+        starwatch::konsole.printf("Neu angemeldet: Hall %s, Licht %s.%s\n", h ? "ja" : "nein",
+                                  l ? "ja" : "nein", h ? " Jetzt 'h'." : "");
+        return;
+      }
       zustand();
       return;
 
     case 'd':
+      if (z[1] == 'n') {
+        // dn: alle TCP-Verbindungen der Uhr (01.10.2026). Port 80 nahm von
+        // aussen minutenlang keine Verbindung an, waehrend Port 23 ging - und
+        // der Stapel kennt nur CONFIG_LWIP_MAX_ACTIVE_TCP = 16 Verbindungen.
+        static const char *const ZUSTAND[] = {"CLOSED", "LISTEN", "SYN_SENT", "SYN_RCVD",
+                                              "ESTABLISHED", "FIN_WAIT_1", "FIN_WAIT_2",
+                                              "CLOSE_WAIT", "CLOSING", "LAST_ACK", "TIME_WAIT"};
+        // ERST SAMMELN, DANN DRUCKEN: die Ausgabe laeuft auch ueber Telnet,
+        // also ueber denselben Stapel - unter seiner Sperre zu schreiben,
+        // haengte die Uhr auf.
+        char text[1100];
+        size_t t = 0;
+        int n = 0;
+        auto zeile = [&](const char *fmt, auto... a) {
+          if (t < sizeof(text))
+            t += snprintf(text + t, sizeof(text) - t, fmt, a...);
+        };
+        LOCK_TCPIP_CORE();
+        for (int liste = 0; liste < 2; liste++) {
+          for (struct tcp_pcb *p = liste == 0 ? tcp_active_pcbs : tcp_tw_pcbs; p != nullptr;
+               p = p->next) {
+            char ip[16];
+            ipaddr_ntoa_r(&p->remote_ip, ip, sizeof(ip));
+            zeile("  %-11s :%u <- %s:%u\n", p->state <= TIME_WAIT ? ZUSTAND[p->state] : "?",
+                  (unsigned)p->local_port, ip, (unsigned)p->remote_port);
+            n++;
+          }
+        }
+        for (struct tcp_pcb_listen *l = tcp_listen_pcbs.listen_pcbs; l != nullptr; l = l->next)
+#if TCP_LISTEN_BACKLOG
+          zeile("  LISTEN      :%u  wartend %u von %u\n", (unsigned)l->local_port,
+                (unsigned)l->accepts_pending, (unsigned)l->backlog);
+#else
+          zeile("  LISTEN      :%u\n", (unsigned)l->local_port);
+#endif
+        UNLOCK_TCPIP_CORE();
+        if (t >= sizeof(text))
+          t = sizeof(text) - 1;
+        text[t] = '\0';
+        starwatch::konsole.print(text);
+        starwatch::konsole.printf("TCP: %d Verbindungen (hoechstens %d)\n", n,
+                                  CONFIG_LWIP_MAX_ACTIVE_TCP);
+        return;
+      }
+      if (z[1] == 'm') {
+        // dm: eigener Zaehler gegen den Mikroschrittzaehler des Treibers
+        // (27.09.2026). Je Mikroschritt zaehlt MSCNT um 256/MIKROSCHRITTE,
+        // Richtung je nach Verdrahtung - deshalb beide Differenzen. Die
+        // passende bleibt zwischen zwei Referenzfahrten KONSTANT, solange
+        // jeder Impuls ankommt. Aendert sie sich, fehlen Impulse; bleibt sie
+        // und der Magnet wandert trotzdem, rutscht der Rotor.
+        if (antrieb.laeuft()) {
+          starwatch::konsole.println("dm nur im Stillstand.");
+          return;
+        }
+        const int32_t pos = antrieb.position();
+        const int32_t ms = antrieb.mscnt();
+        const int32_t je = 256 / g::MIKROSCHRITTE;
+        const int32_t vor = ((ms - je * pos) % 1024 + 1024) % 1024;
+        const int32_t rueck = ((ms + je * pos) % 1024 + 1024) % 1024;
+        starwatch::konsole.printf("MSCNT %ld bei Zaehler %ld: Differenz vor %ld / rueck %ld\n",
+                                  (long)ms, (long)pos, (long)vor, (long)rueck);
+        return;
+      }
       diagnose();
       return;
 
@@ -697,6 +943,45 @@ void kommando(char *z) {
         testweb.wlan_setzen("", "");
         return;
       }
+      if (zweit == 'i') {  // ni dhcp | ni <ip> <maske> <gateway> [dns]
+        // Die Adresse im GESPEICHERTEN Netz umstellen - ueber das Kabel der
+        // Rettungsweg, wenn eine feste Adresse nicht passt und die Uhr im
+        // Heimnetz nicht mehr zu finden ist.
+        char *arg = z + 2;
+        while (*arg == ' ')
+          arg++;
+        const String ssid = testweb.gespeicherte_ssid();
+        if (ssid.length() == 0) {
+          starwatch::konsole.println("Kein Heimnetz gespeichert - erst 'ns <SSID> <PASSWORT>'.");
+          return;
+        }
+        starwatch::Testweb::Adresswahl a;
+        if (strcmp(arg, "dhcp") != 0) {
+          char ip[20] = "", maske[20] = "", gw[20] = "", dns[20] = "";
+          if (sscanf(arg, "%19s %19s %19s %19s", ip, maske, gw, dns) < 3) {
+            const auto g2 = testweb.gespeicherte_adresse();
+            starwatch::konsole.printf(
+                "Adresse jetzt: %s\n"
+                "Format: ni dhcp   oder   ni <ip> <maske> <gateway> [dns]\n"
+                "        ni 192.168.1.50 255.255.255.0 192.168.1.1\n",
+                g2.fest ? (g2.ip + " / " + g2.maske + ", Gateway " + g2.gw).c_str()
+                        : "per DHCP");
+            return;
+          }
+          a.fest = true;
+          a.ip = ip;
+          a.maske = maske;
+          a.gw = gw;
+          a.dns = dns;
+          String fehler;
+          if (!starwatch::Testweb::adresse_pruefen(a, &fehler)) {
+            starwatch::konsole.printf("Nicht gespeichert: %s\n", fehler.c_str());
+            return;
+          }
+        }
+        testweb.wlan_setzen(ssid, testweb.gespeichertes_passwort(), &a);
+        return;
+      }
       if (zweit == 's') {  // ns SSID PASSWORT
         char *arg = z + 2;
         while (*arg == ' ')
@@ -720,7 +1005,7 @@ void kommando(char *z) {
       starwatch::konsole.println(
           "Starte WLAN von Hand. Bricht die Versorgung ein, startet das Geraet\n"
           "neu - dann ist es die Hardware, siehe die Brownout-Meldung.");
-      testweb.beginn(&antrieb, &hall, &licht, &betrieb, kommando);
+      testweb.beginn(&antrieb, &hall, &licht, &lux, &betrieb, kommando);
       return;
     }
 
@@ -782,6 +1067,31 @@ void kommando(char *z) {
     }
 
     case 'p': {
+      if (z[1] == 's') {
+        // ps <n>: laufend nachgeschobenes Ziel (21.10.2026). Fuer das Steuern
+        // von aussen - die App schickt es ueber eine Dauerverbindung auf dem
+        // Log-Port mehrmals je Sekunde.
+        //
+        // SCHWEIGT IM ERFOLGSFALL: bei 50 Befehlen je Sekunde ist jede Zeile
+        // Log eine Last fuer sich, und sie ginge ueber dieselbe Verbindung
+        // zurueck, die die Befehle bringt.
+        const char *arg = z + 2;
+        while (*arg == ' ')
+          arg++;
+        // ABWEISEN, NICHT RATEN: `atol` macht aus jedem Unsinn eine 0, und das
+        // waere ein Sprung auf zwoelf. Bei einem Strom aus dem Netz ist ein
+        // verstuemmeltes Paket der Normalfall, nicht die Ausnahme.
+        if (*arg != '-' && !isdigit((unsigned char)*arg)) {
+          starwatch::konsole.printf(
+              "ps <n>           Ziel laufend nachschieben, kuerzester Weg\n"
+              "                 (auch rueckwaerts; ausserhalb 0..%ld wird gefaltet)\n",
+              (long)g::REV - 1);
+          return;
+        }
+        const bool uhr_aus = betrieb.steuere_auf(static_cast<int32_t>(atol(arg)));
+        uhr_ging_aus(uhr_aus);
+        return;
+      }
       const long n = atol(rest);
       const bool uhr_aus = betrieb.fahre_auf(static_cast<int32_t>(n));
       starwatch::konsole.printf("Fahre auf Schritt %ld (vorwaerts, Ziel %ld).\n", n,
@@ -791,6 +1101,12 @@ void kommando(char *z) {
     }
 
     case 'u': {
+      if (z[1] == 'z') {
+        const bool uhr_aus = betrieb.auf_zwoelf_halten();
+        starwatch::konsole.println("Fahre auf ZWOELF und halte dort, bis 'o!' bestaetigt.");
+        uhr_ging_aus(uhr_aus);
+        return;
+      }
       int32_t ziel = 0;
       if (!zeit_zu_position(rest, &ziel)) {
         starwatch::konsole.println("u <stunde 0..12> oder u HH:MM[:SS]\n"
@@ -814,6 +1130,26 @@ void kommando(char *z) {
 
     case 'y': {
       const char zweit = z[1];
+      if (zweit == '!') {  // y! = laufende Fassung von Hand bestaetigen
+        // FUER DEN PRUEFSTAND. Ein per OTA eingespieltes Image bestaetigt
+        // sich erst mit WLAN, Netzzeit UND erfolgreicher Referenzfahrt. Ohne
+        // Hall-Sensor gelingt die nie - und beim naechsten Neustart faehrt
+        // der Bootloader die vorige Fassung. Am 25.09.2026 am Geraet
+        // genau so passiert: das Update war nach einem Stromzyklus weg.
+        // Wie alle 'y'-Kommandos nur mit Token (kommando_braucht_token).
+        if (!aktualisierung.auf_bewaehrung()) {
+          starwatch::konsole.println("Nichts zu bestaetigen - diese Fassung ist nicht auf Bewaehrung.");
+          return;
+        }
+        aktualisierung.bewaehrt_melden();
+        starwatch::konsole.printf(
+            aktualisierung.auf_bewaehrung()
+                ? "Bestaetigen FEHLGESCHLAGEN - die Fassung bleibt auf Bewaehrung.\n"
+                : "Fassung %s von Hand bestaetigt. Kein Rollback mehr - auch ohne\n"
+                  "Referenzfahrt. Ob sie laeuft, hat damit DER BEDIENER entschieden.\n",
+            g::FIRMWARE_VERSION);
+        return;
+      }
       if (zweit == 'p') {  // yp = jetzt nachsehen
         Langlauf sperre;
         starwatch::konsole.println("Sehe nach, ob es eine neuere Fassung gibt ...");
@@ -821,7 +1157,7 @@ void kommando(char *z) {
         starwatch::konsole.printf("%s\n", aktualisierung.meldung().c_str());
         if (neu_da)
           starwatch::konsole.println("Einspielen mit 'yi'. Die Uhr steht dabei und\n"
-                         "braucht danach eine Referenzfahrt.");
+                         "braucht danach ein Homing.");
         return;
       }
       if (zweit == 'i') {  // yi = einspielen
@@ -876,7 +1212,7 @@ void kommando(char *z) {
         if (aktualisierung.modus() == starwatch::Updatemodus::automatisch)
           starwatch::konsole.printf(
               "Einmal taeglich gegen %d Uhr - nachts, weil die Uhr dabei STEHT\n"
-              "und danach eine Referenzfahrt braucht. Nie waehrend eines Timers.\n",
+              "und danach ein Homing braucht. Nie waehrend eines Timers.\n",
               g::UPDATE_STUNDE);
         return;
       }
@@ -896,6 +1232,76 @@ void kommando(char *z) {
           aktualisierung.meldung().empty() ? "noch nicht geprueft"
                                            : aktualisierung.meldung().c_str(),
           aktualisierung.url().c_str());
+      return;
+    }
+
+    // ALLES EIN ODER AUS. Ein einziger Schalter, weil 'Klinge aus, aber Motor
+    // laeuft weiter' kein Zustand ist, den jemand haben will. Die Reihenfolge
+    // ist nicht beliebig:
+    //   aus  erst anhalten (MIT RAMPE - hart abschneiden reisst dem Riemen
+    //        einen Zahn), dann Licht, dann Endstufe. Andersherum stuende der
+    //        Zeiger stromlos da, waehrend noch Schritte kommen.
+    //   ein  erst Endstufe, dann Referenzfahrt - im Freilauf ist die Klinge
+    //        aus ihrer Lage gekippt, die gezaehlte Position ist wertlos.
+    //        Ohne die Fahrt zeigte die Uhr danach irgendwohin.
+    case 'q': {
+      if (*rest != '0' && *rest != '1') {
+        starwatch::konsole.printf(
+            "Alles ein oder aus. Jetzt: Klinge %s, Endstufe %s.\n"
+            "  q 0   anhalten, Klinge aus, Endstufe aus (Freilauf)\n"
+            "  q 1   Endstufe ein, Homing, Klinge an\n",
+            licht.ist_an() ? "an" : "aus",
+            antrieb.endstufe_an() ? "bestromt" : "aus");
+        return;
+      }
+      if (*rest == '0') {
+        antrieb.stopp_mit_rampe();
+        licht.an(false);
+        antrieb.endstufe(false);
+        betrieb.werte_sichern();
+        starwatch::konsole.println(
+            "Alles aus. Die Klinge kippt jetzt aus ihrer Lage - beim\n"
+            "Einschalten faehrt die Uhr deshalb erst die Referenz.");
+        return;
+      }
+      antrieb.endstufe(true);
+      licht.an(true);
+      betrieb.werte_sichern();
+      starwatch::konsole.println("Alles ein. Homing laeuft, 's' bricht ab.");
+      abbruch_gewuenscht = false;
+      {
+        Langlauf sperre;
+        const starwatch::Homingergebnis e =
+            betrieb.referenzfahrt(pumpe, starwatch::Hominganlass::alles_ein);
+        starwatch::konsole.printf("%s\n", starwatch::hominggrund_text(e.grund));
+      }
+      return;
+    }
+
+    // Effekte, die von SELBST laufen. Nicht die Ausloeser - die bleiben bei
+    // 'lz' und 'ls'. Hier steht nur, OB die Uhr sie selbst startet.
+    case 'j': {
+      const char welcher = z[1];
+      const char *w = rest + 1;
+      while (*w == ' ')
+        w++;
+      if ((welcher == 'z' || welcher == 's') && (*w == '0' || *w == '1')) {
+        const bool an = (*w == '1');
+        if (welcher == 'z')
+          betrieb.effekt_start(an);
+        else
+          betrieb.effekt_stunde(an);
+        starwatch::konsole.printf("%s: %s\n",
+            welcher == 'z' ? "Zuend- und Einfahreffekt" : "Stundeneffekt",
+            an ? "ein" : "aus");
+        return;
+      }
+      starwatch::konsole.printf(
+          "Selbstlaufende Effekte\n"
+          "  Zuend- und Einfahreffekt : %s   (jz 0|1) - Einschalten, Farbwechsel, Nacht\n"
+          "  Stundeneffekt            : %s   (js 0|1)\n",
+          betrieb.effekt_start() ? "ein" : "aus",
+          betrieb.effekt_stunde() ? "ein" : "aus");
       return;
     }
 
@@ -1015,6 +1421,31 @@ void kommando(char *z) {
     }
 
     case 'a': {
+      // NAME DER UHR. Vor der Rampe pruefen: 'alias ...' begaenne sonst mit
+      // 'a' und waere eine Rampe von 0.
+      if (strncmp(z, "alias", 5) == 0 && (z[5] == ' ' || z[5] == '\0')) {
+        const char *name = z + 5;
+        while (*name == ' ')
+          name++;
+        if (*name == '\0') {
+          starwatch::konsole.printf(
+              "Name der Uhr: %s\n"
+              "  alias <name>   setzen, hoechstens %u Zeichen\n"
+              "  alias -        loeschen, dann gilt wieder %s\n",
+              betrieb.alias().empty() ? "(keiner)" : betrieb.alias().c_str(),
+              (unsigned)starwatch::ALIAS_MAX_ZEICHEN, betrieb.geraetename().c_str());
+          return;
+        }
+        const bool loeschen = (strcmp(name, "-") == 0);
+        if (!betrieb.alias(loeschen ? std::string() : std::string(name))) {
+          starwatch::konsole.printf(
+              "Name abgewiesen. Hoechstens %u Zeichen, keine Steuerzeichen,\n"
+              "kein \" \\ < >.\n", (unsigned)starwatch::ALIAS_MAX_ZEICHEN);
+          return;
+        }
+        starwatch::konsole.printf("Name der Uhr: %s\n", betrieb.anzeigename().c_str());
+        return;
+      }
       const long n = atol(rest);
       if (n <= 0) {
         starwatch::konsole.printf(
@@ -1040,34 +1471,73 @@ void kommando(char *z) {
     }
 
     case 'h': {
+      if (z[1] == 'f') {  // hf [fein] [grob] - Tempo der Referenzfahrt messen
+        long fein = 0, grob = 0;
+        const int n = sscanf(z + 2, "%ld %ld", &fein, &grob);
+        if (n >= 1)
+          hall.tempi(static_cast<uint32_t>(fein),
+                     n >= 2 ? static_cast<uint32_t>(grob) : hall.grob_tempo());
+        starwatch::konsole.printf(
+            "Referenzfahrt: Feinfahrt %lu Schritte/s, Grobsuche %lu Schritte/s\n"
+            "(nur bis zum Neustart; 'hf <fein> [grob]', fein 10..800).\n",
+            (unsigned long)hall.fein_tempo(), (unsigned long)hall.grob_tempo());
+        return;
+      }
+      if (z[1] == 'v') {  // hv - Homing-Verlauf (05.10.2026)
+        verlauf_zeigen();
+        return;
+      }
       abbruch_gewuenscht = false;
-      starwatch::konsole.println("\nReferenzfahrt. 's' bricht ab.");
+      starwatch::konsole.println("\nHoming. 's' bricht ab.");
+      const uint32_t homing_ab = millis();
       Langlauf sperre;
-      const starwatch::Homingergebnis e = betrieb.referenzfahrt(pumpe);
+      const starwatch::Homingergebnis e =
+          betrieb.referenzfahrt(pumpe, starwatch::Hominganlass::hand);
       starwatch::konsole.printf("%s\n", starwatch::hominggrund_text(e.grund));
+      // hu: danach SOFORT auf die Uhrzeit statt zehn Sekunden auf zwoelf -
+      // das Ende des Steuerns in der App (27.10.2026).
+      if (e.ok() && z[1] == 'u')
+        betrieb.rueckfall_sofort();
       if (e.ok()) {
-        starwatch::konsole.printf("  Messpunkte %u, Schwelle %.0f mV (%.0f %% des Gipfels)\n",
-                      (unsigned)e.punkte, (double)(e.spanne_v * g::HALL_SCHWELLE_ANTEIL * 1000.0f),
+        starwatch::konsole.printf("  Messpunkte %u, Schwelle %.2f mT (%.0f %% des Gipfels)\n",
+                      (unsigned)e.punkte, (double)(e.spanne_mt * g::HALL_SCHWELLE_ANTEIL),
                       (double)(g::HALL_SCHWELLE_ANTEIL * 100.0f));
         starwatch::konsole.printf("  Schwerpunkt %.2f, Flanke bei %ld, Versatz %.2f\n",
                       (double)e.schwerpunkt, (long)e.pos_flanke,
                       (double)(e.schwerpunkt - e.pos_flanke));
-        starwatch::konsole.printf("  Ruhelinie %.3f V, Spanne %.0f mV %s\n", (double)e.ruhe_v,
-                      (double)(e.spanne_v * 1000.0f),
-                      (e.spanne_v * 1000.0f < g::HALL_SPANNE_MIN_V * 1000.0f)
+        // Die Abweichung rechnet Betrieb::referenzfahrt() - dort steht sie
+        // seit 05.10.2026 auch im Homing-Verlauf ('hv').
+        const int32_t abw = betrieb.letzte_abweichung();
+        starwatch::konsole.printf(
+            "  Abweichung zur letzten Referenz %ld Schritte (%.1f min auf dem Blatt),"
+            " Dauer %.1f s%s\n",
+            (long)abw, (double)(abw * g::SEK_JE_SCHRITT / 60.0f),
+            (double)((millis() - homing_ab) / 1000.0f),
+            betrieb.letzte_vergleichbar() ? "" : " - NICHT VERGLEICHBAR (keine Referenz davor)");
+        verlust_melden("  ");
+        // DIESE ZEILE IST DIE MESSVORSCHRIFT FUER DIE SCHWELLEN in geraet.h.
+        // Sie stehen dort als gesetzte Startwerte, nicht als gemessene: was
+        // hier als Spanne herauskommt, ist die tatsaechliche Gipfelhoehe des
+        // verbauten Magneten in Millitesla.
+        starwatch::konsole.printf("  Ruhelinie %.3f mT, Spanne %.2f mT %s\n", (double)e.ruhe_mt,
+                      (double)e.spanne_mt,
+                      (e.spanne_mt < g::HALL_SPANNE_MIN_MT)
                           ? "-> ZU WENIG, Magnetabstand verringern"
-                          : ((e.spanne_v * 1000.0f > g::HALL_SPANNE_MAX_V * 1000.0f)
+                          : ((e.spanne_mt > g::HALL_SPANNE_MAX_MT)
                                  ? "-> ZU VIEL, Kurve klippt, Abstand vergroessern"
                                  : "-> im Fenster, passt"));
-        if (e.fenster > 0) {
-          starwatch::konsole.printf("  D0-Fenster %ld Schritte", (long)e.fenster);
-          if (e.fenster >= g::HALL_RUECKZUG_SCHRITTE)
-            starwatch::konsole.printf(" -> GROESSER ALS DER RUECKZUG (%ld)! "
-                          "HALL_RUECKZUG_SCHRITTE in geraet.h erhoehen.\n",
-                          (long)g::HALL_RUECKZUG_SCHRITTE);
-          else
-            starwatch::konsole.printf(" (Rueckzug %ld, passt)\n", (long)g::HALL_RUECKZUG_SCHRITTE);
-        }
+        starwatch::konsole.printf("  (HALL_SPANNE_MIN_MT/MAX_MT in geraet.h stehen auf "
+                      "%.1f / %.1f mT und sind noch GESETZT, nicht gemessen)\n",
+                      (double)g::HALL_SPANNE_MIN_MT, (double)g::HALL_SPANNE_MAX_MT);
+        // Beides aus der Feinfahrt (27.09.2026). Die Fahrt endet an der Kurve;
+        // steht "bis" knapp ueber +150, war der Magnet schmal, und die
+        // Mindeststrecke hat gegriffen - das ist gewollt.
+        starwatch::konsole.printf(
+            "  Feldbreite %ld Schritte (ueber %.2f mT), Feinfahrt %ld..%+ld um die Mitte,"
+            " Tempo %lu/%lu\n",
+            (long)e.fenster, (double)g::HALL_GROB_SCHWELLE_MT, (long)e.fein_von,
+            (long)e.fein_bis, (unsigned long)hall.fein_tempo(),
+            (unsigned long)hall.grob_tempo());
         starwatch::konsole.printf("  Offset %ld + Nachlauf %ld -> Zaehler %ld\n",
                       (long)betrieb.hall_offset(), (long)e.nachlauf, (long)e.zaehler);
         starwatch::konsole.println(
@@ -1081,12 +1551,16 @@ void kommando(char *z) {
     case 'o': {
       if (*rest == '!' || z[1] == '!') {
         const bool uhr_aus = betrieb.hier_ist_zwoelf();
+        // Gespeichert - die Klinge blinkt dreimal gruen, auch wenn sie aus ist.
+        licht.signal(starwatch::Licht::Ebene::zustand, 0x00FF00, starwatch::Muster::blinken,
+                     -1.0f, 3000);
         starwatch::konsole.printf(
             "Gemerkt: der Zeiger steht auf ZWOELF. Offset %ld, in NVS gespeichert.\n",
             (long)betrieb.hall_offset());
-        uhr_ging_aus(uhr_aus);
+        (void)uhr_aus;  // sie kommt gleich zurueck - siehe hier_ist_zwoelf()
         starwatch::konsole.println(
-            "Zur Kontrolle 'h' - landet der Zeiger wieder auf zwoelf, ist es eingemessen.");
+            "Zurueck zur Uhrzeit. Zur Kontrolle 'h' - landet der Zeiger auf zwoelf,\n"
+            "ist es eingemessen.");
         return;
       }
 
@@ -1124,6 +1598,25 @@ void kommando(char *z) {
     }
 
     case 't': {
+      // LAUFART. Vor der Dauer pruefen: 'tl' waere sonst "Timer 0 s".
+      if (z[1] == 'l') {
+        const char *w = rest + 1;
+        while (*w == ' ')
+          w++;
+        if (*w == '0' || *w == '1') {
+          betrieb.timerlauf(*w == '1' ? starwatch::Timerlauf::sekundentakt
+                                      : starwatch::Timerlauf::gleitend);
+          starwatch::konsole.printf("Timer laeuft %s.\n",
+              starwatch::timerlauf_text(betrieb.timerlauf()));
+          return;
+        }
+        starwatch::konsole.printf(
+            "Timer-Laufart: %s\n"
+            "  tl 0   gleitend - ein Zug, gleichmaessig\n"
+            "  tl 1   Sekundentakt - steht, springt jede Sekunde\n",
+            starwatch::timerlauf_text(betrieb.timerlauf()));
+        return;
+      }
       if (*rest == '-' || z[1] == '-') {
         betrieb.timer_abbrechen();
         starwatch::konsole.println("Timer abgebrochen.");
@@ -1166,7 +1659,9 @@ void kommando(char *z) {
     case 'w': {
       const float p = atof(rest);
       licht.pwm_direkt(p);
-      starwatch::konsole.printf("PWM direkt %.1f %% (ohne Kennlinie).\n", (double)p);
+      starwatch::konsole.printf(
+          "PWM direkt %.1f %% (ohne Kennlinie), LED %.2f W von hoechstens %.2f W.\n",
+          (double)p, (double)licht.leistung_w(), (double)g::LED_MAX_W);
       return;
     }
 
@@ -1180,6 +1675,13 @@ void kommando(char *z) {
 
     case 'l': {
       const char zweit = z[1];
+      // Das Argument der ZWEIBUCHSTABIGEN Kommandos (lu, lf). `rest` beginnt
+      // hinter dem ERSTEN Buchstaben und traegt den zweiten noch mit - aus
+      // "lu 1" wird dort "u 1". Deshalb lief 'lu 0' / 'lu 1' bisher auf das
+      // Umschalten hinaus statt auf den festen Wert (gefunden 25.09.2026).
+      const char *arg2 = (zweit != '\0') ? z + 2 : z + 1;
+      while (*arg2 == ' ')
+        arg2++;
       if (zweit == 'a') {
         licht.an(true);
         betrieb.werte_sichern();
@@ -1188,6 +1690,242 @@ void kommando(char *z) {
         licht.an(false);
         betrieb.werte_sichern();
         starwatch::konsole.println("Klinge aus.");
+      } else if (zweit == 'u') {
+        // Lichtautomatik (27.09.2026: gespeichert, alle Werte einstellbar).
+        //   lu            umschalten        lu 0 / lu 1   aus / an
+        //   lu n [0|1]    Nachtabschaltung
+        //   lu min <%>    kleinste Helligkeit, Anteil des Reglers
+        //   lu hell <lx>  ab hier voller Reglerwert
+        //   lu aus <lx>   Nacht: darunter aus (an beim Sechsfachen)
+        // Ungueltige Zahlen werden NICHT uebernommen - atof machte aus "abc"
+        // eine 0, und die Grenze machte daraus still das Minimum.
+        starwatch::Lichtautomatik a = betrieb.lichtautomatik();
+        const char *arg = arg2;
+        char wort[8] = {0};
+        float zahl = 0.0f;
+        const int n = sscanf(arg, "%7s %f", wort, &zahl);
+        bool ok = true;
+        if (n <= 0)
+          a.an = !a.an;
+        else if (strcmp(wort, "0") == 0 || strcmp(wort, "1") == 0)
+          a.an = wort[0] == '1';
+        else if (strcmp(wort, "n") == 0)
+          a.nacht = (n == 2) ? (zahl != 0.0f) : !a.nacht;
+        else if (strcmp(wort, "min") == 0 && n == 2)
+          a.anteil_min = zahl / 100.0f;
+        else if (strcmp(wort, "hell") == 0 && n == 2)
+          a.lux_hell = zahl;
+        else if (strcmp(wort, "aus") == 0 && n == 2)
+          a.nacht_aus = zahl;
+        else
+          ok = false;
+        if (!ok) {
+          starwatch::konsole.println("lu [0|1] | lu n [0|1] | lu min <%> | lu hell <lx> | lu aus <lx>");
+          return;
+        }
+        betrieb.lichtautomatik_setzen(a);
+        const starwatch::Lichtautomatik &b = betrieb.lichtautomatik();
+        starwatch::konsole.printf(
+            "Lichtautomatik %s, Nachtabschaltung %s.\n"
+            "  kleinste Helligkeit %.0f %% des Reglers unter %.1f lx, voll ab %.0f lx\n"
+            "  Nacht: aus unter %.1f lx, an ueber %.1f lx (je %lu s Frist)\n",
+            b.an ? "AN" : "AUS", b.nacht ? "AN" : "AUS", (double)(b.anteil_min * 100.0f),
+            (double)g::LUX_DUNKEL, (double)b.lux_hell, (double)b.nacht_aus,
+            (double)starwatch::nacht_an_lux(b), (unsigned long)(g::LUX_NACHT_VERZUG_MS / 1000));
+        if (!lux.bereit())
+          starwatch::konsole.printf("  Aber: %s - ohne Sensor wirkt sie nicht.\n",
+                                    starwatch::luxgrund_text(lux.grund()));
+        else if (lux.gemessen())
+          starwatch::konsole.printf("  Jetzt %.1f lx.\n", (double)lux.lux());
+      } else if (zweit == 'm') {
+        // MELDUNG: die Klinge leuchtet in einer Farbe, bis quittiert wird oder
+        // die Dauer abgelaufen ist. Gedacht fuer Home Assistant ("Pflanzen
+        // giessen" = gelb), geht aber genauso von der Konsole.
+        //   lm                          Zustand
+        //   lm gelb                     gelb, ruhig, bis 'lm-'
+        //   lm #00ff00 pulsieren 600 40 gruen, pulsierend, 10 min, 40 %
+        //   lm-   oder   lm aus         quittieren
+        const char *arg = arg2;
+        using E = starwatch::Licht::Ebene;
+        if (*arg == '-' || strcmp(arg, "aus") == 0) {
+          const bool war = licht.signal_zustand(E::meldung).aktiv;
+          licht.signal_aus(E::meldung);
+          starwatch::konsole.println(war ? "Meldung quittiert." : "Keine Meldung aktiv.");
+          return;
+        }
+        if (*arg == '\0') {
+          const auto s = licht.signal_zustand(E::meldung);
+          if (!s.aktiv)
+            starwatch::konsole.println("Keine Meldung aktiv.");
+          else if (s.rest_ms == 0)
+            starwatch::konsole.printf("Meldung #%06lX, %s, %.0f %%, bis quittiert ('lm-').\n",
+                                      (unsigned long)s.farbe, starwatch::muster_text(s.muster),
+                                      (double)s.hell);
+          else
+            starwatch::konsole.printf("Meldung #%06lX, %s, %.0f %%, noch %lu s.\n",
+                                      (unsigned long)s.farbe, starwatch::muster_text(s.muster),
+                                      (double)s.hell, (unsigned long)(s.rest_ms / 1000u));
+          return;
+        }
+        starwatch::Meldung m;
+        if (!starwatch::meldung_lesen(arg, &m)) {
+          starwatch::konsole.println(
+              "Keine Meldung. 'lm <farbe> [leuchten|pulsieren|blinken] [dauer_s] [hell_%]'\n"
+              "Farbe als Name (rot gruen blau gelb violett weiss orange tuerkis) oder Hex.");
+          return;
+        }
+        licht.signal(E::meldung, m.farbe, m.muster, m.hell, m.dauer_s * 1000u);
+        const auto s = licht.signal_zustand(E::meldung);
+        starwatch::konsole.printf("Meldung #%06lX, %s, %.0f %%, %s.\n", (unsigned long)s.farbe,
+                                  starwatch::muster_text(s.muster), (double)s.hell,
+                                  m.dauer_s == 0 ? "bis quittiert ('lm-')" : "mit Ablauf");
+      } else if (zweit == 'f') {
+        // Farbe der Klinge. 'lf' zeigt sie, 'lf ff8800' oder 'lf 255 136 0'
+        // setzt sie - MIT Zuendung, die von der alten zur neuen Farbe
+        // gleitet. 'lfr <farbe>' setzt ohne: das schicken die Farbregler,
+        // die beim Ziehen alle 250 ms einen Wert senden.
+        const char *arg = arg2;
+        bool mit_zuendung = true;
+        if (arg[0] == 'r' && arg[1] == ' ') {
+          mit_zuendung = false;
+          arg += 2;
+          while (*arg == ' ')
+            arg++;
+        }
+        if (*arg == '\0') {
+          starwatch::konsole.printf("Farbe #%06lX.\n", (unsigned long)licht.farbe());
+          return;
+        }
+        uint32_t f = 0;
+        if (!starwatch::farbe_lesen(arg, &f, betrieb.weiss())) {
+          starwatch::konsole.println("Keine Farbe. 'lf ff8800' oder 'lf 255 136 0'.");
+          return;
+        }
+        licht.farbe(f, mit_zuendung);
+        betrieb.werte_sichern();
+        float k[3];
+        const float w = starwatch::kanal_anteile(
+            starwatch::tastverhaeltnis(licht.soll_prozent(), licht.min_prozent()), f,
+            g::LED_WATT_VOLL, g::LED_MAX_W, k);
+        starwatch::konsole.printf(
+            "Farbe #%06lX. Bei %.0f %% Regler: R %.1f %%  G %.1f %%  B %.1f %% "
+            "Tastverhaeltnis, %.2f W (Grenze %.2f W).\n",
+            (unsigned long)f, (double)licht.soll_prozent(), (double)(k[0] * 100.0f),
+            (double)(k[1] * 100.0f), (double)(k[2] * 100.0f), (double)w,
+            (double)g::LED_MAX_W);
+      } else if (zweit == 'g' || zweit == 'p') {
+        // UEBERGANG UND PULS (0.20.0). Die Woerter nach dem ersten Argument:
+        //   a / o / z   an / aus / an mit Zuendung (nur lg)
+        //   h <p>       Helligkeit in Prozent
+        //   f <farbe>   Farbe wie bei 'lf'
+        const char *arg = arg2;
+        if (zweit == 'p' && (*arg == '-' || strncmp(arg, "aus", 3) == 0)) {
+          const char *z2 = (*arg == '-') ? arg + 1 : arg + 3;
+          const long ms = (*z2 != '\0') ? atol(z2) : 1000;
+          const bool lief = licht.puls_aktiv();
+          licht.puls_beenden(ms < 0 ? 0 : static_cast<uint32_t>(ms));
+          betrieb.werte_sichern();
+          starwatch::konsole.printf(lief ? "Puls beendet, %ld ms zurueck.\n"
+                                         : "Kein Puls - trotzdem %ld ms zurueck.\n", ms);
+          return;
+        }
+        if (zweit == 'p' && (strncmp(arg, "periode", 7) == 0 || strncmp(arg, "min", 3) == 0)) {
+          const bool per = (arg[0] == 'p');
+          const float zahl = atof(arg + (per ? 7 : 3));
+          if (!(zahl > 0.0f)) {
+            starwatch::konsole.println("lp periode <400..4000 ms> | lp min <1..50 %>");
+            return;
+          }
+          if (per)
+            betrieb.puls_setzen(static_cast<uint32_t>(zahl), licht.puls_min());
+          else
+            betrieb.puls_setzen(licht.puls_periode(), zahl / 100.0f);
+          starwatch::konsole.printf("Puls: Periode %lu ms, Minimum %.0f %%.\n",
+                                    (unsigned long)licht.puls_periode(),
+                                    (double)(licht.puls_min() * 100.0f));
+          return;
+        }
+        // Woerter lesen. Die Farbe darf Leerzeichen enthalten ('255 0 0'),
+        // deshalb steht sie IMMER zuletzt und nimmt den ganzen Rest.
+        long ms = -1;
+        int an = -1;
+        bool zuend = false;
+        float hell = -1.0f;
+        bool farbe_da = false;
+        uint32_t farbe = 0;
+        const char *p = arg;
+        if (zweit == 'g') {
+          char *ende = nullptr;
+          ms = strtol(p, &ende, 10);
+          if (ende == p || ms < 0) {
+            starwatch::konsole.println("lg <ms> [a|o|z] [h <p>] [f <farbe>]");
+            return;
+          }
+          p = ende;
+        }
+        while (*p != '\0') {
+          while (*p == ' ')
+            p++;
+          if (*p == '\0')
+            break;
+          if ((p[0] == 'a' || p[0] == 'o' || p[0] == 'z') && (p[1] == ' ' || p[1] == '\0')) {
+            an = (p[0] == 'o') ? 0 : 1;
+            zuend = (p[0] == 'z');
+            p++;
+          } else if (p[0] == 'h' && p[1] == ' ') {
+            char *ende = nullptr;
+            hell = strtof(p + 2, &ende);
+            p = ende;
+          } else if (p[0] == 'f' && p[1] == ' ') {
+            farbe_da = starwatch::farbe_lesen(p + 2, &farbe, betrieb.weiss());
+            if (!farbe_da) {
+              starwatch::konsole.println("Keine Farbe. 'f ff8800' oder 'f 255 136 0'.");
+              return;
+            }
+            break;
+          } else {
+            starwatch::konsole.printf("Unbekannt: '%s'.\n", p);
+            return;
+          }
+        }
+        if (zweit == 'p') {
+          licht.puls_starten(farbe_da, farbe, hell);
+          starwatch::konsole.printf("Puls #%06lX bis %.0f %%, Minimum %.0f %%, Periode %lu ms.\n",
+                                    (unsigned long)licht.puls_farbe(), (double)licht.puls_max(),
+                                    (double)(licht.puls_min() * 100.0f),
+                                    (unsigned long)licht.puls_periode());
+          return;
+        }
+        if (zuend) {
+          // Einschalten mit Zuendung: Werte vorher still setzen, die Zuendung
+          // nimmt sie mit. Nur wenn die Klinge aus ist - sonst weich.
+          starwatch::Licht::Weich w;
+          w.hell = hell;
+          w.farbe_da = farbe_da;
+          w.farbe = farbe;
+          if (!licht.ist_an() && !licht.puls_aktiv()) {
+            licht.weich_setzen(w, 0);
+            licht.zuenden();
+          } else {
+            w.an = 1;
+            licht.weich_setzen(w, 500);
+          }
+        } else {
+          starwatch::Licht::Weich w;
+          w.an = an;
+          w.hell = hell;
+          w.farbe_da = farbe_da;
+          w.farbe = farbe;
+          licht.weich_setzen(w, static_cast<uint32_t>(ms));
+        }
+        betrieb.werte_sichern();
+        starwatch::konsole.printf("Klinge %s, %.0f %%, #%06lX in %ld ms.\n",
+                                  licht.ist_an() ? "an" : "aus", (double)licht.soll_prozent(),
+                                  (unsigned long)licht.farbe(), ms < 0 ? 0L : ms);
+      } else if (zweit == 'b') {
+        const int n = atoi(arg2);
+        licht.blitzen(n > 0 ? n : 1);
+        starwatch::konsole.printf("%d Blitz(e).\n", n > 0 ? n : 1);
       } else if (zweit == 'z') {
         licht.zuenden();
         starwatch::konsole.println("Zuende die Roehre.");
@@ -1201,6 +1939,25 @@ void kommando(char *z) {
         licht.rampe();
         starwatch::konsole.println("Rampe 0-20 % in halben Prozent, 700 ms je Stufe (28 s).\n"
                        "Gesucht: ab welchem Wert glimmt sie? -> Messprotokoll.");
+      } else if (zweit == 'w') {
+        // lw [farbe] - Weiss DIESER Uhr (27.10.2026), gespeichert im
+        // Fertigungsbereich. Gilt fuer 'lf weiss', den Weiss-Knopf und die App.
+        // Leuchtet die Klinge gerade weiss, bekommt sie das neue gleich mit.
+        const char *arg = arg2;
+        if (*arg != '\0') {
+          uint32_t f = 0;
+          if (!starwatch::farbe_lesen(arg, &f, betrieb.weiss())) {
+            starwatch::konsole.println("Keine Farbe. 'lw 64ff96' oder 'lw 100 255 150'.");
+            return;
+          }
+          const bool war_weiss = licht.farbe() == betrieb.weiss();
+          betrieb.weiss(f);
+          if (war_weiss) {
+            licht.farbe(f);
+            betrieb.werte_sichern();
+          }
+        }
+        starwatch::konsole.printf("Weiss dieser Uhr #%06lX.\n", (unsigned long)betrieb.weiss());
       } else if (zweit == 't') {
         licht.treppe();
         starwatch::konsole.println("Treppe 0-100 % in Zehnerschritten, 3 s je Stufe (33 s).\n"
@@ -1269,11 +2026,129 @@ void konsole_lesen() {
 // setup und loop
 // ===========================================================================
 
+/// Ein sichtbares Zeichen mit der Klinge - blockierend.
+///
+/// ===========================================================================
+/// WARUM DIE KONSOLE HIER NICHT REICHT
+/// ===========================================================================
+/// Der Werksreset ueber Stromzyklen ist ausdruecklich der Weg fuer jemanden,
+/// der VOR dem Geraet steht und weder Konsole noch Token hat - "Strom ist der
+/// Taster", siehe geraet.h. Seine Rueckmeldung ausschliesslich auf die
+/// serielle Schnittstelle zu legen, ist derselbe Fehler wie beim
+/// AP-Schluessel: der Weg ist fuer den gedacht, der die Rueckmeldung nicht
+/// sehen kann.
+///
+/// BLOCKIEREND, und das ist hier richtig. Die Effektketten in lib/licht
+/// laufen ueber `licht.tick()` aus der Hauptschleife - die gibt es an dieser
+/// Stelle noch nicht, und beim Werksreset folgt unmittelbar der Neustart.
+///
+/// `pwm_direkt` statt `soll_prozent`: das hier ist ein Signal, keine
+/// Helligkeit. Es soll bei jeder Reglerstellung gleich aussehen und nicht
+/// durch die Kennlinie laufen.
+void klinge_meldet(int male, uint32_t an_ms, uint32_t aus_ms) {
+  if (male <= 0)
+    return;
+  for (int i = 0; i < male; i++) {
+    licht.pwm_direkt(100.0f);
+    delay(an_ms);
+    licht.pwm_direkt(0.0f);
+    delay(aus_ms);
+  }
+}
+
+/// Netze suchen und als Liste fuer das Bluetooth-Merkmal aufbereiten.
+String ble_netze() {
+  const int n = testweb.netze_suchen();
+  std::vector<starwatch::Funknetz> v;
+  for (int i = 0; i < n; i++) {
+    starwatch::Funknetz f;
+    f.ssid = WiFi.SSID(i).c_str();
+    f.rssi = WiFi.RSSI(i);
+    f.offen = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+    v.push_back(f);
+  }
+  WiFi.scanDelete();
+  return starwatch::netze_json(v, 512).c_str();
+}
+
+/// EINRICHTUNG PER BLUETOOTH (23.10.2026) - laeuft genau so lange wie der
+/// offene Zugangspunkt und nimmt dieselbe Angabe an (siehe lib/einrichtung).
+void ble_einrichtung_tick() {
+  static uint32_t ende_ab = 0;
+  if (testweb.offener_ap() && !ble.laeuft() && !ble.beendet()) {
+    const String name = String("StarWatch-") + betrieb.seriennummer().c_str();
+    ble.starten(name, ble_netze());
+    starwatch::konsole.printf("Einrichtung per Bluetooth: '%s' wirbt.\n", name.c_str());
+  }
+  if (!ble.laeuft())
+    return;
+
+  String daten;
+  bool scan = false;
+  if (ble.auftrag_abholen(&daten, &scan)) {
+    std::string ssid, pass;
+    if (scan) {
+      ble.melden("{\"stand\":\"suche\"}");
+      ble.netze(ble_netze());
+      ble.melden("{\"stand\":\"bereit\"}");
+    } else if (!starwatch::wlan_auftrag_lesen(daten.c_str(), &ssid, &pass)) {
+      ble.melden("{\"stand\":\"fehler\",\"grund\":\"angabe\"}");
+    } else {
+      ble.melden("{\"stand\":\"verbinde\"}");
+      starwatch::konsole.println("\n[ble] WLAN-Angabe erhalten.");  // nie das Passwort
+      if (testweb.wlan_setzen(ssid.c_str(), pass.c_str()))
+        ble.melden("{\"stand\":\"verbunden\",\"ip\":\"" + testweb.heimnetz_adresse() +
+                   "\",\"token\":\"" + betrieb.token().c_str() + "\"}");
+      else
+        ble.melden("{\"stand\":\"fehler\",\"grund\":\"verbindung\"}");
+    }
+  }
+
+  // Einrichtung vorbei - hier oder im Browser: eine Minute, damit die App
+  // den Status noch lesen kann, dann Bluetooth ganz aus und Speicher frei.
+  if (!testweb.offener_ap()) {
+    if (ende_ab == 0)
+      ende_ab = millis();
+    else if (millis() - ende_ab > 60000) {
+      ble.beenden();
+      starwatch::konsole.println("Einrichtung per Bluetooth beendet.");
+    }
+  }
+}
+
 void setup() {
   Serial.begin(g::TMC_BAUD);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // `Serial` ist das USB-Serial/JTAG des C3. Haengt ein Rechner
+  // am Kabel, ohne dass ein Terminal liest, wartet der Kern bei vollem
+  // Puffer je write() bis zu 20 x 100 ms (HWCDC.cpp, "host backpressure") -
+  // zwei Sekunden, in denen die Hauptschleife steht: kein Uhrbetrieb, kein
+  // Webserver, keine Rampe. Mit 0 verwirft er stattdessen sofort. Die Zeilen
+  // stehen ohnehin auch im Netz-Log (/test/log).
+  Serial.setTxTimeoutMs(0);
+#endif
+
+  // ===================================================================
+  // STROMZYKLEN ZUERST ZAEHLEN - vor allem anderen, auch vor dem Warten auf
+  // die Konsole. Wie bei einer Lampe: fuenfmal kurz aus und an. Die Uhr ist
+  // dabei jedes Mal nur einen Augenblick an; gezaehlt wurde vorher erst nach
+  // Sensoren und Treiber, also gut eine Sekunde spaeter - dann war sie
+  // schon wieder aus (26.09.2026).
+  //
+  // BROWNOUT ZAEHLT MIT. Beim kurzen Abziehen haelt C1 die Schiene noch
+  // einen Moment; die Spannung faellt nicht ganz auf null, und der Chip
+  // meldet einen Einbruch statt eines Einschaltens. Eine Brownout-SCHLEIFE
+  // kann trotzdem keinen Reset ausloesen: nach einem Brownout startet die
+  // Uhr kein WLAN (siehe unten), und damit endet die Schleife nach einem Mal.
+  // ===================================================================
+  const esp_reset_reason_t start_grund = esp_reset_reason();
+  const bool werksreset_faellig = betrieb.zyklus_zaehlen(
+      start_grund == ESP_RST_POWERON || start_grund == ESP_RST_BROWNOUT);
+
   delay(400);
 
-  starwatch::konsole.println("\n\n=== Star Watch - Betriebsfirmware, AP 2 ===");
+  starwatch::konsole.printf("\n\n=== Star Watch - Betriebsfirmware %s ===\n",
+                            g::FIRMWARE_VERSION);
 
   // Grund des letzten Neustarts. AP 6.3 verlangt ihn ohnehin im
   // Diagnoseendpunkt - hier steht er, weil er beim Aufbau sofort hilft.
@@ -1283,6 +2158,29 @@ void setup() {
   // Neustartschleife, in der es sich nicht mehr flashen liess. Zu SEHEN war
   // ohne diese Meldung nur ein Geraet, das staendig von vorn anfing.
   const bool kam_von_brownout = (esp_reset_reason() == ESP_RST_BROWNOUT);
+
+  // BROWNOUTS IN FOLGE ZAEHLEN (26.09.2026). Bisher sperrte schon EIN
+  // Brownout das WLAN - und ein Brownout ist auch, wer die Uhr kurz aus- und
+  // wieder einsteckt (C1 haelt die Schiene einen Moment). Die Uhr war danach
+  // offline bis zum naechsten richtigen Einschalten. Jetzt: nach dem ersten
+  // Brownout EIN Versuch; erst der zweite in Folge heisst "es war wirklich der
+  // Funkstart" und sperrt - damit endet eine Schleife trotzdem nach zwei
+  // Durchlaeufen. Zurueckgesetzt wird durch jeden anderen Start und nach einer
+  // Minute ruhigen Laufs (loop()).
+  {
+    Preferences p;
+    p.begin("sw_start", false);
+    const uint32_t alt = p.getUInt("bo_folge", 0);
+    brownout_folge = kam_von_brownout ? alt + 1 : 0;
+    if (brownout_folge != alt)
+      p.putUInt("bo_folge", brownout_folge);
+    p.end();
+  }
+  const bool wlan_sperren = brownout_folge >= 2;
+  // Nach EINEM Brownout mit gedrosselter Sendeleistung funken - siehe
+  // SENDELEISTUNG in testweb.cpp. Gilt nur fuer diesen Start.
+  if (brownout_folge >= 1)
+    starwatch::Testweb::funk_drosseln();
 
   switch (esp_reset_reason()) {
     case ESP_RST_BROWNOUT:
@@ -1319,7 +2217,59 @@ void setup() {
         "Die Klinge bleibt dunkel. Das ist KEIN Fehler der Verdrahtung -\n"
         "Frequenz und Aufloesung passen nicht zum 80-MHz-Takt des LEDC.\n",
         g::PIN_LED_PWM, (unsigned long)g::LED_PWM_HZ);
-  hall.beginn();
+
+  // DEN ZAEHLERSTAND ZEIGEN, sobald das Licht steht - nicht erst nach
+  // Sensoren und Treiber. Wer fuenfmal aus- und einsteckt, zaehlt sonst im
+  // Kopf mit und weiss nie, ob die Uhr mitgezaehlt hat. So blinkt sie bei
+  // jedem Einschalten so oft, wie sie schon gezaehlt hat. Beim fuenften Mal
+  // blinkt sie nicht hier, sondern sechsmal schnell beim Reset unten.
+  if (betrieb.zyklen() > 0 && !werksreset_faellig)
+    klinge_meldet(static_cast<int>(betrieb.zyklen()), 150, 200);
+  // ===================================================================
+  // I2C-BUS UND DIE BEIDEN SENSOREN DARAN
+  //
+  // Der Bus kommt VOR dem Antrieb: ohne Hall-Sensor kann die Uhr nicht
+  // referenzieren, und das soll im Protokoll oben stehen und nicht
+  // zwischen den Treibermeldungen untergehen.
+  // ===================================================================
+  if (!starwatch::i2cbus::beginn()) {
+    starwatch::konsole.printf(
+        "FEHLER: I2C an SDA=GPIO%u / SCL=GPIO%u liess sich nicht einrichten.\n",
+        g::PIN_SDA, g::PIN_SCL);
+  } else {
+    // Absuchen und melden, was da ist. Zwei der drei Steckplaetze sind
+    // optional, und ein Suchlauf, der sagt was er findet, spart jede
+    // spaetere Ratestunde: steht hier nichts, liegt es an Stecker oder
+    // Ader und nicht am Treiber.
+    uint8_t gefunden[8];
+    const size_t n = starwatch::i2cbus::absuchen(gefunden, sizeof(gefunden));
+    starwatch::konsole.printf("I2C-Bus      %u Teilnehmer\n", (unsigned)n);
+    for (size_t i = 0; i < n && i < sizeof(gefunden); i++) {
+      const char *wer = starwatch::i2cbus::name(gefunden[i]);
+      starwatch::konsole.printf("             0x%02X  %s\n", (unsigned)gefunden[i],
+                    wer != nullptr ? wer : "UNBEKANNT - gehoert hier nicht hin");
+    }
+    if (n == 0)
+      starwatch::konsole.println(
+          "             Kein einziger. Die Pull-ups sitzen auf dem Brett\n"
+          "             (R11/R12) - also Stecker J5 und Ader pruefen.");
+  }
+
+  if (!hall.beginn())
+    starwatch::konsole.printf(
+        "FEHLER: Hall-Sensor an J5 - %s.\n"
+        "Die Uhr kann NICHT referenzieren und weiss nicht, wo der Zeiger steht.\n"
+        "Alles andere laeuft; 'h' wird abbrechen, statt eine Umdrehung zu suchen.\n",
+        starwatch::tmaggrund_text(hall.sensorgrund()));
+
+  if (lux.beginn())
+    starwatch::konsole.printf(
+        "Umgebungslicht  VEML7700 an J8 gefunden. Automatik steht bereit.\n");
+  else
+    starwatch::konsole.printf(
+        "Umgebungslicht  %s. Die Klinge bleibt auf dem eingestellten Wert,\n"
+        "                ohne Nachtabschaltung. Das ist kein Fehler der Uhr.\n",
+        starwatch::luxgrund_text(lux.grund()));
 
   starwatch::konsole.print("Antrieb ... ");
   const bool uart_ok = antrieb.beginn();
@@ -1327,20 +2277,28 @@ void setup() {
                          : "TREIBER ANTWORTET NICHT.");
   if (!uart_ok)
     starwatch::konsole.println(
-        "Der Antrieb laeuft trotzdem - die Impulse kommen aus dem ESP32, und\n"
-        "der Strom ist durch Vref 0,55 V auch ohne UART begrenzt. Aber die\n"
-        "Register sind NICHT gesetzt, also gilt der Werkszustand: der Strom\n"
-        "kommt vom Trimmpoti. 'd' sagt, woran es liegen kann.");
+        "Der Antrieb laeuft trotzdem - die Impulse kommen aus dem ESP. Die\n"
+        "Register sind aber NICHT gesetzt, und VREF (U2.17) ist unbeschaltet:\n"
+        "der Strom steht damit nicht fest. Nach oben begrenzt ihn R_SENSE\n"
+        "0,47 Ohm auf 0,47 A RMS - unter dem Motornennstrom.\n"
+        "'d' sagt, woran es liegen kann.");
 
   betrieb.beginn(&antrieb, &hall, &licht);
 
+  // Den gemerkten Lichtzustand MERKEN, aber noch nicht anwenden. Angewandt
+  // wird er in zuenden_wenn_bereit(), sobald die Referenz steht - siehe dort.
+  // Ohne diese zwei Zeilen leuchtet die Klinge beim Start unabhaengig davon,
+  // ob der Zeiger seine Lage kennt.
+  klinge_wunsch_an = licht.ist_an();
+  licht.an(false);
+
   // ===================================================================
   // WERKSRESET DURCH STROMZYKLEN - der Weg zurueck ohne Token.
-  // Begruendung bei den Kennzahlen in geraet.h. NUR echtes Einschalten
-  // zaehlt; ein Neustart per Software oder ein Update duerfen die Uhr
-  // nicht loeschen.
+  // Begruendung bei den Kennzahlen in geraet.h. Gezaehlt wurde ganz oben
+  // in setup(); hier wird ausgefuehrt, weil der Werksreset den geoeffneten
+  // Benutzerbereich (betrieb.beginn) braucht.
   // ===================================================================
-  if (betrieb.zyklus_zaehlen(esp_reset_reason() == ESP_RST_POWERON)) {
+  if (werksreset_faellig) {
     starwatch::konsole.printf(
         "\n*** WERKSRESET durch %lu Stromzyklen ***\n"
         "Benutzerwerte und WLAN werden geloescht. Der Hall-Offset BLEIBT -\n"
@@ -1348,14 +2306,17 @@ void setup() {
         (unsigned long)g::RESET_ZYKLEN);
     betrieb.werksreset();
     testweb.wlan_setzen("", "");
-    delay(2000);
+    // ERST JETZT den Zaehler loeschen - der Reset ist geschehen. Wer vorher
+    // abzieht, bekommt ihn beim naechsten Einschalten.
+    betrieb.zyklen_loeschen();
+    klinge_meldet(6, 120, 180);  // sechs schnelle Blitze: es ist passiert
     ESP.restart();
   }
   if (betrieb.zyklen() > 0)
     starwatch::konsole.printf(
-        "Stromzyklen: %lu von %lu. Noch %lu mal aus- und einschalten fuer den\n"
-        "Werksreset - oder die Uhr laenger als %lu s laufen lassen, dann faellt\n"
-        "der Zaehler zurueck.\n",
+        "Stromzyklen: %lu von %lu. Noch %lu mal kurz aus- und einschalten fuer\n"
+        "den Werksreset - oder die Uhr laenger als %lu s laufen lassen, dann\n"
+        "faellt der Zaehler zurueck.\n",
         (unsigned long)betrieb.zyklen(), (unsigned long)g::RESET_ZYKLEN,
         (unsigned long)(g::RESET_ZYKLEN - betrieb.zyklen()),
         (unsigned long)(g::RESET_FENSTER_MS / 1000u));
@@ -1392,36 +2353,48 @@ void setup() {
         "'Geraet'; dort verlangt es das Token.");
   }
 
+  // Waehrend das Update laedt, bedient der Webserver niemanden - sonst
+  // konkurrieren Abfragen der Oberflaeche mit dem Datenstrom.
+  aktualisierung.ruhe_hook([](bool an) { starwatch::Testweb::stumm(an); });
   aktualisierung.beginn(g::FIRMWARE_VERSION);
   // Nur fuer den Diagnosebericht - die Oberflaeche laeuft auch ohne.
   testweb.aktualisierung_anbinden(&aktualisierung);
   if (aktualisierung.auf_bewaehrung())
     starwatch::konsole.println(
         "\nDIESES IMAGE LAEUFT AUF BEWAEHRUNG. Es wird erst bestaetigt, wenn\n"
-        "WLAN steht, die Zeit gueltig ist UND eine Referenzfahrt gelaufen ist.\n"
+        "WLAN steht, die Zeit gueltig ist UND ein Homing gelaufen ist.\n"
         "Bis dahin faehrt der Bootloader bei einem Neustart die vorige Fassung.");
   starwatch::konsole.printf("Hall-Offset aus NVS: %ld\n", (long)betrieb.hall_offset());
 
   // Weboberflaeche ZULETZT: sie braucht alle Bibliotheken, und wenn das WLAN
   // nicht steht, soll der Rest trotzdem schon gelaufen sein.
   //
-  // NACH EINEM BROWNOUT WIRD SIE NICHT GESTARTET. Das Einschalten des
-  // Funkmoduls war die Ursache des Einbruchs; wuerde die Firmware es stur
-  // wieder versuchen, brauecke sie sofort wieder ein - genau die
-  // Neustartschleife, in der sich das Geraet nicht mehr flashen liess.
+  // NACH ZWEI BROWNOUTS IN FOLGE WIRD SIE NICHT GESTARTET (siehe oben). Das
+  // Einschalten des Funkmoduls war dann die Ursache des Einbruchs; wuerde die
+  // Firmware es stur wieder versuchen, braeche sie sofort wieder ein - genau
+  // die Neustartschleife, in der sich das Geraet nicht mehr flashen liess.
   //
   // Das ist keine Notloesung fuer den Aufbau, sondern eine Regel, die auch
   // fuer das Produkt gilt: ein Geraet darf sich nicht selbst in eine
   // Neustartschleife bringen. Es soll erreichbar bleiben - und sei es nur
   // ueber das Kabel -, damit man es reparieren kann.
-  if (kam_von_brownout) {
+  if (kam_von_brownout && !wlan_sperren)
     starwatch::konsole.println(
-        "\nWLAN WIRD NICHT GESTARTET, weil der letzte Neustart ein Brownout war.\n"
-        "Sonst bricht die Versorgung sofort wieder ein und das Geraet haengt in\n"
-        "einer Neustartschleife. Alles andere laeuft: Motor, Hall, Licht, Uhr.\n"
-        "Mit 'n' kann das WLAN von Hand versucht werden.");
+        "\nLetzter Neustart war ein Brownout - WLAN wird EINMAL versucht. Bricht\n"
+        "die Versorgung dabei wieder ein, bleibt es beim naechsten Start aus.");
+  if (wlan_sperren) {
+    starwatch::konsole.printf(
+        "\nWLAN WIRD NICHT GESTARTET: %lu Brownouts in Folge - der Funkstart\n"
+        "bringt die Versorgung zum Einbruch. Alles andere laeuft: Motor, Hall,\n"
+        "Licht, Uhr. Mit 'n' kann das WLAN von Hand versucht werden; ein\n"
+        "normales Aus- und Einschalten hebt die Sperre auf.\n",
+        (unsigned long)brownout_folge);
   } else {
-    testweb.beginn(&antrieb, &hall, &licht, &betrieb, kommando);
+    testweb.beginn(&antrieb, &hall, &licht, &lux, &betrieb, kommando);
+    // MQTT NACH dem WLAN. `beginn` verbindet noch nicht - es merkt sich nur
+    // die Zeiger; der erste Versuch faellt in die Hauptschleife, sobald ein
+    // Broker eingetragen und der Haken gesetzt ist.
+    mqtt.beginn(&betrieb, &licht, &antrieb, &lux, kommando);
   }
 
   // =========================================================================
@@ -1435,27 +2408,43 @@ void setup() {
   // Reboot ist die Position verloren -> Homing laeuft vor allem anderen." Bis
   // 23.08.2026 war das eine Regel ohne Umsetzung.
   //
-  // DIE REIHENFOLGE IST ABSICHT. Zuenden zuerst: die Zuendkette ist eine
-  // Kette mit Zeitmarken und laeuft in `licht.tick()` weiter - und `pumpe()`,
-  // das die Referenzfahrt am Leben haelt, ruft genau dieses tick(). Die
-  // Klinge zuendet also, WAEHREND der Zeiger seine Null sucht, statt danach.
-  licht.zuenden();
+  // ===================================================================
+  // DIE KLINGE BLEIBT HIER DUNKEL. Geaendert am 24.09.2026.
+  // ===================================================================
+  // Hier stand `licht.zuenden()`, mit der Begruendung, die Zuendkette laufe
+  // ueber `pumpe()` waehrend der Referenzfahrt weiter. DAS WAR NICHT WAHR:
+  // `Betrieb::referenzfahrt()` ruft in seinen ersten Zeilen
+  // `effekt_abbrechen()` und `an(false)`. Der Effekt kam nie ueber die
+  // zweite Stufe hinaus - uebrig blieb ein Zucken.
+  //
+  // Schlimmer war die Folge am Ende: `referenzfahrt()` stellt die Klinge
+  // wieder her, "AUCH wenn die Fahrt abgebrochen ist". Eine Uhr ohne
+  // Hall-Sensor leuchtete also nach dem Start, ohne je gefahren zu sein -
+  // sie leuchtete und zeigte nichts.
+  //
+  // Jetzt zuendet sie erst, wenn sie wirklich etwas zu zeigen hat: nach
+  // erfolgreicher Referenzfahrt UND mit gueltiger Zeit. Siehe
+  // `zuenden_wenn_bereit()`. Damit ist die leuchtende Klinge eine
+  // Betriebsmeldung und keine Startanimation - und eine dunkle Klinge sagt
+  // "ich weiss nicht, wo ich stehe" oder "ich kenne die Zeit nicht".
 
   // Zeit holen, BEVOR die Referenzfahrt blockiert: SNTP braucht ein paar
   // Sekunden, und die laufen dann waehrend der Referenzfahrt ab statt danach.
   ntp_starten();
 
-  starwatch::konsole.println("\nReferenzfahrt beim Start. 's' bricht ab.");
+  starwatch::konsole.println("\nHoming beim Start. 's' bricht ab.");
   starwatch::Homingergebnis start_e;
   {
     Langlauf sperre;
-    start_e = betrieb.referenzfahrt(pumpe);
+    start_e = betrieb.referenzfahrt(pumpe, starwatch::Hominganlass::start);
   }
   starwatch::konsole.printf("%s\n", starwatch::hominggrund_text(start_e.grund));
   if (!start_e.ok())
     starwatch::konsole.println(
         "Ohne Referenz kennt die Uhr ihre Lage nicht - sie zeigt erst nach\n"
-        "einem erfolgreichen 'h' die richtige Zeit. Ursachen nennt 'd'.");
+        "einem erfolgreichen 'h' die richtige Zeit. Ursachen nennt 'd'.\n"
+        "DIE KLINGE BLEIBT SOLANGE DUNKEL. Das ist kein Fehler des Lichts,\n"
+        "sondern die Aussage, dass die Uhr ihre Lage nicht kennt.");
   abbruch_gewuenscht = false;
 
   starwatch::konsole.printf(
@@ -1489,18 +2478,24 @@ void setup() {
 // nichts anderes den Zeiger brauchen.
 
 /// Eine Referenzfahrt aus der Hauptschleife heraus, mit Sperre und Meldung.
-void referenzfahrt_nachholen(const char *warum) {
-  starwatch::konsole.printf("\n[auto] Referenzfahrt: %s\n", warum);
+void referenzfahrt_nachholen(const char *warum, starwatch::Hominganlass anlass) {
+  starwatch::konsole.printf("\n[auto] Homing: %s\n", warum);
   homing_letzter_versuch_ms = millis();
   starwatch::Homingergebnis e;
   {
     Langlauf sperre;
-    e = betrieb.referenzfahrt(pumpe);
+    e = betrieb.referenzfahrt(pumpe, anlass);
   }
   abbruch_gewuenscht = false;
   if (e.ok()) {
     homing_fehlschlaege = 0;
-    starwatch::konsole.printf("[auto] OK.\n> ");
+    if (betrieb.letzte_vergleichbar())
+      starwatch::konsole.printf("[auto] OK, Abweichung %ld Schritte.\n",
+                                (long)betrieb.letzte_abweichung());
+    else
+      starwatch::konsole.printf("[auto] OK.\n");
+    verlust_melden("[auto] ");
+    starwatch::konsole.print("> ");
   } else {
     homing_fehlschlaege++;
     starwatch::konsole.printf(
@@ -1530,7 +2525,8 @@ void referenzfahrt_pflege() {
     if (homing_letzter_versuch_ms != 0 &&
         millis() - homing_letzter_versuch_ms < frist)
       return;
-    referenzfahrt_nachholen("letzte war nicht erfolgreich");
+    referenzfahrt_nachholen("letzte war nicht erfolgreich",
+                            starwatch::Hominganlass::nachholen);
     return;
   }
 
@@ -1550,17 +2546,238 @@ void referenzfahrt_pflege() {
   if (t.tm_hour == homing_letzte_stunde)
     return;  // in dieser Stunde schon gelaufen
   homing_letzte_stunde = t.tm_hour;
-  referenzfahrt_nachholen("taeglich");
+  referenzfahrt_nachholen("taeglich", starwatch::Hominganlass::taeglich);
 }
+
+namespace {
+
+/// Hat die Klinge seit dem Einschalten schon einmal gezuendet?
+///
+/// EINMAL JE START, und das ist wichtig: spaeter schaltet der Benutzer das
+/// Licht selbst, und ein zweites Zuenden wuerde ihm dazwischenfunken. Auch
+/// eine von Hand ausgeloeste Referenzfahrt darf es nicht erneut ausloesen.
+bool klinge_gezuendet = false;
+
+
+/// Seit wann steht die Referenz? 0 = noch nicht. Bezugspunkt fuer die Frist,
+/// die die Klinge der Zeit einraeumt.
+uint32_t referenz_seit_ms = 0;
+
+/// Zuenden, sobald die Uhr wirklich die Zeit zeigt.
+///
+/// EINE HARTE BEDINGUNG UND EINE FRIST:
+///
+///   HART: die Referenzfahrt war erfolgreich. Ohne Referenz kennt der Zeiger
+///   seine Lage nicht, und eine leuchtende Klinge ueber einer geratenen
+///   Position ist eine Falschaussage. Ohne sie zuendet sie nie.
+///
+///   FRIST: danach bekommt die Zeit ZUEND_FRIST_OHNE_ZEIT_MS, um einzutreffen.
+///   Steht sie, zuendet die Klinge sofort - der Zeiger zeigt dann im selben
+///   Augenblick das Richtige. Steht sie nach der Frist immer noch nicht,
+///   zuendet sie trotzdem.
+///
+/// WARUM DIE FRIST UND KEINE ZWEITE HARTE BEDINGUNG: hier stand bis zum
+/// Abend des 24.09.2026 "ohne Zeit bleibt sie dunkel". Das war zu streng.
+/// Dieses Geraet ist mehr als eine Uhr - Timer, Licht, Home Assistant und die
+/// Sensoren laufen ohne Zeit weiter, nur der Zeiger nicht. Aus einer
+/// fehlenden Zeitanzeige ein totes Geraet zu machen, war ein Denkfehler: die
+/// Klinge ist das LICHT, nicht die Zeitanzeige.
+///
+/// GEPRUEFT WIRD `zeit_gueltig()`, NICHT `zeit_aus_netz()`. Der zweite ist
+/// nur wahr, wenn die Zeit aus dem NETZ kam; wer sie von Hand stellt
+/// ('z 14:30'), setzt den ersten. Mit der falschen Abfrage waere die Klinge
+/// bei von Hand gestellter Zeit nie angegangen.
+void zuenden_wenn_bereit() {
+  if (klinge_gezuendet)
+    return;
+  if (!betrieb.letztes_homing().ok())
+    return;  // ohne Referenz gar nicht - das ist die harte Bedingung
+
+  if (referenz_seit_ms == 0)
+    referenz_seit_ms = millis();
+
+  const bool zeit_da = betrieb.zeit_gueltig();
+  if (!zeit_da && millis() - referenz_seit_ms < g::ZUEND_FRIST_OHNE_ZEIT_MS)
+    return;  // der Zeit ihre Frist lassen
+
+  klinge_gezuendet = true;
+
+  // Wollte der Benutzer sie aus, bleibt sie aus. Die Referenz ist die
+  // Bedingung dafuer, dass sie an sein DARF - keine Anweisung, dass sie an
+  // sein SOLL.
+  if (!klinge_wunsch_an) {
+    starwatch::konsole.println(
+        "\n[start] Referenz steht. Die Klinge bleibt aus, weil sie beim "
+        "letzten Mal aus war.");
+    return;
+  }
+
+  // licht.zuenden() fragt den Schalter "Zuend- und Einfahreffekt" selbst ab:
+  // an = Lichtschwert-Zuendung, aus = ruhiges Einblenden (28.09.2026).
+  licht.zuenden();
+  if (zeit_da)
+    starwatch::konsole.println(
+        "\n[start] Referenz steht und die Zeit ist da - Klinge an.");
+  else
+    starwatch::konsole.printf(
+        "\n[start] Referenz steht, aber nach %lu s keine Zeit - Klinge trotzdem\n"
+        "        an. Timer, Licht und Home Assistant laufen; der Zeiger bleibt\n"
+        "        auf zwoelf stehen, bis die Zeit kommt.\n",
+        (unsigned long)(g::ZUEND_FRIST_OHNE_ZEIT_MS / 1000u));
+}
+
+/// Umgebungslicht messen und anwenden. Aus der Hauptschleife.
+void licht_automatik_tick() {
+  lux.tick();
+
+  // Ohne Sensor oder mit abgeschalteter Automatik: Faktor auf 1 und nichts
+  // weiter. Der Aufruf ist billig und macht den Rueckweg eindeutig - sonst
+  // bliebe der zuletzt gesetzte Faktor stehen, wenn der Stecker an J8 im
+  // Betrieb herausfaellt.
+  const starwatch::Lichtautomatik &a = betrieb.lichtautomatik();
+
+  // Hat die NACHT die Klinge ausgeschaltet und wird die Nachtabschaltung
+  // (oder die ganze Automatik) jetzt abgestellt, geht sie wieder an - sonst
+  // bliebe sie dunkel, bis jemand von Hand schaltet, und niemand wuesste
+  // warum. Nur dann: eine von Hand ausgeschaltete Klinge bleibt aus.
+  static bool nacht_hat_aus = false;
+  static bool erster_lauf = true;
+  static bool letzter_automat = true;
+  if (nacht_hat_aus && (!a.nacht || !lux.bereit())) {
+    nacht_hat_aus = false;
+    if (!licht.ist_an())
+      licht.zuenden();
+    // Den Schalter auf "an" zuruecksetzen: sonst stuende er noch auf "Nacht",
+    // und nach dem Wiedereinschalten der Nachtabschaltung bliebe die Klinge
+    // in einem dunklen Zimmer an, bis es einmal hell und wieder dunkel war.
+    const starwatch::Nachtschalter &alt = betrieb.nachtschalter();
+    betrieb.nachtschalter() =
+        starwatch::Nachtschalter(alt.aus_lux(), alt.an_lux(), g::LUX_NACHT_VERZUG_MS,
+                                 g::LUX_NACHT_AN_VERZUG_MS);
+    letzter_automat = true;
+  }
+
+  const bool messwert = lux.bereit() && lux.gemessen();
+
+  // 1. Dimmen - WEICH (27.09.2026).
+  //
+  // Das ZIEL kommt aus dem Messwert, oder ist 1, wenn die Automatik aus ist
+  // oder der Sensor fehlt. Der FAKTOR laeuft ihm im Takt LUX_BLENDE_TAKT_MS
+  // exponentiell hinterher. Vorher wurde er direkt gesetzt, und weil der
+  // Sensor nur alle 2 s misst, sprang die Klinge in sichtbaren Stufen.
+  //
+  // NUR IM TAKT SCHREIBEN, und nur bei einer Aenderung: licht.dimmfaktor()
+  // rechnet die Kennlinie neu und schreibt das Tastverhaeltnis in den LEDC,
+  // diese Funktion laeuft aber in JEDEM Schleifendurchlauf. Steht der Faktor
+  // am Ziel, liefert dimm_nachfuehren genau das Ziel, und es wird nichts
+  // mehr geschrieben.
+  {
+    const float ziel = (a.an && messwert)
+        ? starwatch::licht_anteil(lux.lux(), g::LUX_DUNKEL, a.lux_hell, a.anteil_min)
+        : 1.0f;
+    static uint32_t blende_ms = 0;
+    // ZWEI STUFEN hintereinander (28.09.2026): die erste folgt dem Ziel, der
+    // Faktor folgt der ersten. Eine einzelne Stufe springt zu Beginn am
+    // schnellsten los und kriecht dann aus - das sah man als Ruck. Zwei
+    // ergeben eine S-Kurve: sanft los, sanft an. Und etwas langsamer: 95 %
+    // nach rund 4,7 statt 3 Zeitkonstanten.
+    static float stufe = -1.0f;
+    if (stufe < 0.0f)
+      stufe = licht.dimmfaktor();
+    const uint32_t jetzt = millis();
+    if (jetzt - blende_ms >= g::LUX_BLENDE_TAKT_MS) {
+      // Nach einer Pause (erster Lauf, langer Block) nicht mit der ganzen
+      // Pause rechnen - sonst waere der erste Schritt wieder ein Sprung.
+      uint32_t dt = jetzt - blende_ms;
+      if (blende_ms == 0 || dt > 4u * g::LUX_BLENDE_TAKT_MS)
+        dt = g::LUX_BLENDE_TAKT_MS;
+      blende_ms = jetzt;
+      stufe = starwatch::dimm_nachfuehren(stufe, ziel, dt, g::LUX_BLENDE_MS);
+      const float neu = starwatch::dimm_nachfuehren(licht.dimmfaktor(), stufe, dt,
+                                                    g::LUX_BLENDE_MS);
+      if (neu != licht.dimmfaktor())
+        licht.dimmfaktor(neu);
+    }
+  }
+  if (!a.nacht || !messwert)
+    return;
+
+  const float hell = lux.lux();
+
+  // 2. Nachtabschaltung.
+  //
+  // NUR BEI EINER FLANKE ZUGREIFEN, nie dauernd. Das ist der ganze Trick,
+  // mit dem die Automatik neben allem anderen bestehen kann, das die Klinge
+  // schaltet - dem Kommando 'l'/'lo', der Weboberflaeche, Home Assistant
+  // und vor allem lib/betrieb, das waehrend der Referenzfahrt und der
+  // Leerfahrt selbst ein- und ausschaltet.
+  //
+  // Wuerde hier in jedem Durchlauf licht.an(soll_an) stehen, kaempfte die
+  // Automatik mit jedem von ihnen: von Hand ausgeschaltet waere die Klinge
+  // zwei Sekunden spaeter wieder an, und die Referenzfahrt koennte sie nicht
+  // mehr dunkel halten.
+  //
+  // So greift die Automatik genau zweimal am Tag zu - wenn es dunkel wird
+  // und wenn es hell wird. Dazwischen gehoert die Klinge dem, der sie
+  // zuletzt angefasst hat.
+  const bool soll_an = betrieb.nachtschalter().aktualisiere(hell, millis());
+
+  if (erster_lauf) {
+    // Beim Start NICHT zugreifen: der Schalter faengt auf "an" an, und ein
+    // Zugriff hier setzte die Klinge auf einen Wert, den niemand verlangt
+    // hat. Erst die erste echte Umschaltung zaehlt.
+    erster_lauf = false;
+    letzter_automat = soll_an;
+    return;
+  }
+  if (soll_an == letzter_automat)
+    return;
+
+  letzter_automat = soll_an;
+  // MIT ANIMATION (28.09.2026): hell geworden -> die Klinge zuendet, dunkel
+  // geworden -> sie faehrt ein. Vorher ging sie einfach aus bzw. an.
+  if (soll_an)
+    licht.zuenden();
+  else
+    licht.loeschen();
+  nacht_hat_aus = !soll_an;
+  starwatch::konsole.printf("\n[licht] %.1f lx -> Klinge %s.\n> ", (double)hell,
+                soll_an ? "an" : "aus (Nacht)");
+}
+
+}  // namespace
 
 void loop() {
   konsole_lesen();
   testweb.tick();
+  // Eine Minute ruhig gelaufen: die Brownouts davor waren keine Folge mehr.
+  // Einmal schreiben, nicht in jedem Durchlauf.
+  if (brownout_folge > 0 && millis() > 60000) {
+    Preferences p;
+    p.begin("sw_start", false);
+    p.putUInt("bo_folge", 0);
+    p.end();
+    brownout_folge = 0;
+  }
   // Erst hier, nicht in setup(): kam das WLAN spaeter (Brownout-Fall, 'n',
   // 'ns'), soll die Zeit trotzdem noch geholt werden.
   ntp_starten();
   ntp_nachstellen();
   betrieb.tick();
+  ble_einrichtung_tick();
+
+  // EINRICHTUNG SICHTBAR (23.10.2026): solange der offene Zugangspunkt steht,
+  // blinkt die Klinge blau - sonst sieht man nicht, ob der Werksreset gegriffen
+  // hat. Endet von selbst, sobald das Heimnetz verbunden ist.
+  static bool einrichtung_blinkt = false;
+  if (testweb.offener_ap() != einrichtung_blinkt) {
+    einrichtung_blinkt = testweb.offener_ap();
+    if (einrichtung_blinkt)
+      licht.signal(starwatch::Licht::Ebene::zustand, 0x0000FF, starwatch::Muster::blinken,
+                   -1.0f, 0);
+    else
+      licht.signal_aus(starwatch::Licht::Ebene::zustand);
+  }
 
   // ---------------------------------------------------------------------
   // Bewaehrung: ein frisch eingespieltes Image bestaetigen - aber STRENG.
@@ -1575,12 +2792,15 @@ void loop() {
     aktualisierung.bewaehrt_melden();
     if (!aktualisierung.auf_bewaehrung())
       starwatch::konsole.printf(
-          "\n[update] Fassung %s bestaetigt - WLAN, Zeit und Referenzfahrt\n"
+          "\n[update] Fassung %s bestaetigt - WLAN, Zeit und Homing\n"
           "         stimmen. Kein Rollback mehr.\n> ", g::FIRMWARE_VERSION);
   }
 
   betrieb.zyklus_tick();
+  mqtt.tick();
   referenzfahrt_pflege();
+  zuenden_wenn_bereit();
+  licht_automatik_tick();
 
   // Taegliches Nachsehen. Nur wenn nichts anderes den Zeiger braucht.
   {

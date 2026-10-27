@@ -2,15 +2,21 @@
 
 #include <Arduino.h>
 #include <geraet.h>
+#include <zeiger.h>
 
 namespace starwatch {
 
 namespace g = geraet;
 
 namespace {
+// WELCHER UART. Der C3 hat nur ZWEI - Serial2 gibt es dort nicht. Serial1 legt die GPIO-Matrix
+// auf IO20/IO21; dass das zugleich die Vorgabepins von UART0 sind, stoert
+// nicht, weil `Serial` auf dem C3 das USB-CDC ist und UART0 unbenutzt bleibt.
+HardwareSerial &tmc_seriell = Serial1;
+
 // Statisch, nicht auf dem Heap: TMC2209Stepper haelt einen Zeiger auf den
 // Stream, und der muss die Lebensdauer des Objekts ueberdauern.
-TMC2209Stepper tmc_objekt(&Serial2, g::R_SENSE, g::TMC_ADDR);
+TMC2209Stepper tmc_objekt(&tmc_seriell, g::R_SENSE, g::TMC_ADDR);
 }  // namespace
 
 const char *treiberzustand_text(Treiberzustand z) {
@@ -34,7 +40,7 @@ const char *treiberzustand_text(Treiberzustand z) {
 bool Antrieb::beginn() {
   tmc_ = &tmc_objekt;
 
-  Serial2.begin(g::TMC_BAUD, SERIAL_8N1, g::PIN_UART_RX, g::PIN_UART_TX);
+  tmc_seriell.begin(g::TMC_BAUD, SERIAL_8N1, g::PIN_UART_RX, g::PIN_UART_TX);
 
   // Register ZUERST, Endstufe danach. Siehe Kopf von antrieb.h.
   register_setzen(static_cast<uint16_t>(g::MIKROSCHRITTE));
@@ -74,6 +80,7 @@ void Antrieb::register_setzen(uint16_t mikroschritte) {
   tmc_->microsteps(mikroschritte);
   tmc_->rms_current(g::STROM_LAUF,
                     static_cast<float>(g::STROM_HALT) / g::STROM_LAUF);
+  halt_ma_ = g::STROM_HALT;
   tmc_->iholddelay(6);
   tmc_->TPOWERDOWN(20);
   tmc_->en_spreadCycle(false);   // false = stealthChop ... im Stand und langsam
@@ -111,6 +118,8 @@ void Antrieb::endstufe(bool ein) {
     motor_->enableOutputs();
   else
     motor_->disableOutputs();
+  if (endstufe_an_ && !ein)
+    freilaeufe_++;
   endstufe_an_ = ein;
 }
 
@@ -136,9 +145,27 @@ void Antrieb::rampe(uint32_t beschleunigung, uint32_t bremsung) {
   (void)bremsung;
 }
 
+bool Antrieb::tempo_mhz(uint32_t milli_hz) {
+  if (motor_ == nullptr || milli_hz == 0)
+    return false;
+  if (motor_->setSpeedInMilliHz(milli_hz) != 0)
+    return false;
+  // Aufgerundet, damit tempo() nie 0 meldet - darauf teilt der Pruefstand.
+  tempo_ = (milli_hz + 999u) / 1000u;
+  // setSpeed allein wirkt erst mit dem naechsten moveTo. Ohne diese Zeile
+  // liefe eine Fahrt mit dem alten Tempo weiter.
+  if (motor_->isRunning())
+    motor_->applySpeedAcceleration();
+  return true;
+}
+
 void Antrieb::fahre_zu(int32_t position) {
   if (motor_ == nullptr)
     return;
+  // Eine vorige WEICHE Fahrt hat Beschleunigung und Einsatz veraendert - fuer
+  // diese Fahrt gilt wieder genau die eingestellte Rampe.
+  motor_->setAcceleration(beschleunigung_);
+  motor_->setLinearAcceleration(0);
   ziel_ = position;
   stopp_angefordert_ = false;
   motor_->moveTo(position);
@@ -148,6 +175,39 @@ void Antrieb::fahre_weiter(int32_t schritte) {
   if (motor_ == nullptr || schritte == 0)
     return;
   fahre_zu(ziel() + schritte);
+}
+
+void Antrieb::fahre_weich_zu(int32_t position) {
+  if (motor_ == nullptr)
+    return;
+  const int32_t d = position - motor_->getCurrentPosition();
+  const uint32_t weg = static_cast<uint32_t>(d < 0 ? -d : d);
+  uint32_t a = weiche_beschleunigung(weg, beschleunigung_, g::WEICH_MIN_MS);
+  // FAEHRT ER SCHON, muss er vor dem Ziel zum Stehen kommen: v^2/(2*weg),
+  // mit einem Fuenftel Reserve. Sonst schoesse er mit der kleinen Rampe
+  // eines kurzen Sprungs ueber das Ziel hinaus und kaeme zurueck - etwa
+  // wenn am Ende einer schnellen Timer-Gleitfahrt die letzten Schritte
+  // weich nachgesetzt werden.
+  if (motor_->isRunning() && weg > 0) {
+    const double v = static_cast<double>(motor_->getCurrentSpeedInMilliHz()) / 1000.0;
+    const double brems = v * v / (2.0 * static_cast<double>(weg)) * 1.2 + 1.0;
+    const uint32_t a_stopp =
+        brems >= static_cast<double>(beschleunigung_) ? beschleunigung_
+                                                      : static_cast<uint32_t>(brems);
+    if (a_stopp > a)
+      a = a_stopp;
+  }
+  motor_->setAcceleration(a);
+  motor_->setLinearAcceleration(weicher_einsatz(weg, g::WEICH_EINSATZ_MAX));
+  ziel_ = position;
+  stopp_angefordert_ = false;
+  motor_->moveTo(position);
+}
+
+void Antrieb::fahre_weich_weiter(int32_t schritte) {
+  if (motor_ == nullptr || schritte == 0)
+    return;
+  fahre_weich_zu(ziel() + schritte);
 }
 
 int32_t Antrieb::position() const {
@@ -196,6 +256,13 @@ void Antrieb::stopp_mit_rampe() {
   if (motor_ == nullptr)
     return;
   stopp_angefordert_ = true;
+  // Mit der EINGESTELLTEN Rampe bremsen: nach einem kleinen weichen Sprung
+  // stuende hier sonst eine Beschleunigung von ein paar hundert Schritten/s^2,
+  // und eine schnelle Fahrt rollte sekundenlang aus.
+  motor_->setAcceleration(beschleunigung_);
+  motor_->setLinearAcceleration(0);
+  if (motor_->isRunning())
+    motor_->applySpeedAcceleration();
   motor_->stopMove();
 }
 
@@ -225,6 +292,18 @@ uint16_t Antrieb::ma_aus_cs(uint8_t cs) {
       lroundf((cs + 1) / 32.0f * vfs / (g::R_SENSE + 0.02f) * 0.70711f * 1000.0f));
 }
 
+void Antrieb::haltestrom(uint16_t ma) {
+  if (ma < g::HALTESTROM_MIN)
+    ma = g::HALTESTROM_MIN;
+  if (ma > g::STROM_LAUF)
+    ma = g::STROM_LAUF;
+  halt_ma_ = ma;
+  if (tmc_ == nullptr)
+    return;
+  // IHOLD ist ein Anteil von IRUN (32 Stufen, an C4E8 rund 15 mA je Stufe).
+  tmc_->rms_current(g::STROM_LAUF, static_cast<float>(ma) / g::STROM_LAUF);
+}
+
 uint16_t Antrieb::strom_ma() {
   if (tmc_ == nullptr)
     return 0;
@@ -247,6 +326,12 @@ uint16_t Antrieb::mikroschritte() {
   if (tmc_ == nullptr)
     return 0;
   return tmc_->microsteps();
+}
+
+uint16_t Antrieb::mscnt() {
+  if (tmc_ == nullptr)
+    return 0;
+  return tmc_->MSCNT();
 }
 
 void Antrieb::spreadcycle(bool ein) {

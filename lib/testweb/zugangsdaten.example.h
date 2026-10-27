@@ -7,9 +7,18 @@
 // dieselbe Regel wie bei esphome/secrets.yaml. Vor jedem Commit pruefen.
 //
 // OHNE diese Datei laeuft die Firmware trotzdem: sie spannt dann einen
-// eigenen Zugangspunkt auf (siehe unten), und die Test-Weboberflaeche ist
-// unter http://192.168.4.1 erreichbar. Zum Pruefen am Aufbau genuegt das.
+// eigenen Zugangspunkt auf, und die Test-Weboberflaeche ist unter
+// http://192.168.4.1 erreichbar. Zum Pruefen am Aufbau genuegt das.
 // Der Weg ueber das Heimnetz ist bequemer, weil das Handy dabei online bleibt.
+//
+// SEIT 23.09.2026 IST DIESER ZUGANGSPUNKT OFFEN, solange noch keine
+// WLAN-Zugangsdaten bekannt sind - weder hier einkompiliert noch im NVS
+// gespeichert. Kein Schluessel, kein Abtippen von der seriellen Konsole.
+// Dafuer ist dort AUSSCHLIESSLICH das Eintragen des WLANs frei; Motor, Licht,
+// Geraeteblatt und Update verlangen auch dort das Token.
+//
+// Legst du diese Datei an, gibt es den Zugangspunkt bei der Einrichtung gar
+// nicht erst: die Uhr haengt nach dem Flashen von selbst im Netz.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -34,6 +43,10 @@
 // Start selbst und legt sie im Fertigungsbereich ab - der Name enthaelt die
 // Seriennummer ("StarWatch-089C"). Nachzulesen im Geraeteblatt: beim Start auf
 // der Konsole und in der Weboberflaeche unter "Geraet".
+//
+// UND SEIT 23.09.2026 wird der Schluessel bei der Ersteinrichtung gar nicht
+// mehr gebraucht - siehe oben. Er gilt nur noch fuer den Rettungsweg: wenn
+// Zugangsdaten bekannt sind, das Netz aber nicht erreichbar ist.
 //
 // Die beiden Zeilen bleiben nur stehen, damit alte Kopien dieser Datei noch
 // uebersetzen. Sie werden nicht mehr benutzt.
