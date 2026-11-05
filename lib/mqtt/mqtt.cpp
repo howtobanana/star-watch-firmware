@@ -276,7 +276,10 @@ void Mqtt::zustand_senden(bool erzwingen) {
       lux_da && (s_lux_ < 0.0f || fabsf(lux_wert - s_lux_) > 0.2f ||
                  fabsf(lux_wert - s_lux_) > 0.05f * s_lux_);
 
-  const uint32_t farbe = puls ? licht_->puls_farbe() : licht_->farbe();
+  // Home Assistant bekommt die Farbe so zurueck, wie es sie geschickt hat -
+  // die Werkskalibrierung (farbe_korrigiert unten) wird herausgerechnet.
+  const uint32_t farbe = farbe_unkorrigiert(puls ? licht_->puls_farbe() : licht_->farbe(),
+                                            betrieb_->weiss());
   const auto meld = licht_->signal_zustand(Licht::Ebene::meldung);
   const bool meld_neu = meld.aktiv != s_meld_ ||
                         (meld.aktiv && (meld.farbe != s_meld_farbe_ ||
@@ -380,8 +383,11 @@ void Mqtt::nachricht(const char *thema, const char *inhalt) {
     char h[12] = "", f[12] = "";
     if (b.hell > 0)
       snprintf(h, sizeof(h), " h %d", b.hell);
+    // FREIE FARBE AUS HA (27.10.2026): ueber das kalibrierte Weiss dieser Uhr
+    // korrigiert - HA-Weiss ffffff wird ihr Weiss, reine Farben bleiben voll.
     if (b.farbe_da)
-      snprintf(f, sizeof(f), " f %06lX", static_cast<unsigned long>(b.farbe));
+      snprintf(f, sizeof(f), " f %06lX",
+               static_cast<unsigned long>(farbe_korrigiert(b.farbe, betrieb_->weiss())));
     const bool puls = licht_->puls_aktiv();
 
     if (b.state == 0 || b.hell == 0) {

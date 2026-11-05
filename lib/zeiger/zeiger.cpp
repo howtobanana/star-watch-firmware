@@ -852,8 +852,10 @@ int hexziffer(char c) {
 namespace {
 struct Farbname {
   const char *name;
-  uint32_t farbe;
+  int index;  ///< in FARB_SCHLUESSEL / die Werkskalibrierung
 };
+// DIE VORGABEN, abgestimmt an C4E8. Seit 27.10.2026 kalibriert jede Uhr sie
+// selbst ('lk', Fertigungsbereich) - die LEDs streuen von Uhr zu Uhr.
 // Am Geraet abgestimmt. Weiss (27.09.2026) ist warm, 255/215/100 - volles
 // RGB wirkt kalt-blaeulich; es liegt mit rund 2,1 W unter der
 // Leistungsgrenze und leuchtet voll. Kaltweiss geht weiter als ffffff.
@@ -861,11 +863,16 @@ struct Farbname {
 //   Gelb    255/110/0   (vorher 255/128/0 - noch zu gruenlich)
 //   Blau    0/20/255    (ein Hauch Gruen, reines Blau wirkt an der Klinge tintig)
 //   Violett 155/0/255   (vorher 255/0/255 - das war eher Magenta)
+constexpr const char *FARB_SCHLUESSEL[FARBEN_KAL] = {
+    "rot", "orange", "gelb", "gruen", "tuerkis", "blau", "violett", "weiss"};
+constexpr const char *FARB_NAME[FARBEN_KAL] = {
+    "Rot", "Orange", "Gelb", "Gr\xc3\xbcn", "T\xc3\xbcrkis", "Blau", "Violett", "Wei\xc3\x9f"};
+constexpr uint32_t FARB_VORGABE[FARBEN_KAL] = {
+    0xFF0000, 0xFF3000, 0xFF6E00, 0x00FF00, 0x00FFFF, 0x0014FF, 0x9B00FF, 0xFFD764};
 constexpr Farbname FARBNAMEN[] = {
-    {"rot", 0xFF0000},     {"gruen", 0x00FF00},   {"gr\xc3\xbcn", 0x00FF00},
-    {"blau", 0x0014FF},    {"gelb", 0xFF6E00},    {"violett", 0x9B00FF},
-    {"weiss", 0xFFD764},   {"wei\xc3\x9f", 0xFFD764}, {"orange", 0xFF3000},
-    {"tuerkis", 0x00FFFF}, {"t\xc3\xbcrkis", 0x00FFFF},
+    {"rot", 0},     {"orange", 1},  {"gelb", 2},          {"gruen", 3},
+    {"gr\xc3\xbcn", 3}, {"tuerkis", 4}, {"t\xc3\xbcrkis", 4}, {"blau", 5},
+    {"violett", 6}, {"weiss", 7},   {"wei\xc3\x9f", 7},
 };
 
 /// Vergleich ohne Ruecksicht auf Gross/klein (nur ASCII - die Umlaute der
@@ -884,7 +891,62 @@ bool wort_gleich(const char *a, const char *ende, const char *b) {
 }
 }  // namespace
 
-bool farbe_lesen(const char *text, uint32_t *farbe, uint32_t weiss) {
+const char *farb_schluessel(int i) { return (i >= 0 && i < FARBEN_KAL) ? FARB_SCHLUESSEL[i] : ""; }
+const char *farb_name(int i) { return (i >= 0 && i < FARBEN_KAL) ? FARB_NAME[i] : ""; }
+uint32_t farb_vorgabe(int i) { return (i >= 0 && i < FARBEN_KAL) ? FARB_VORGABE[i] : 0; }
+
+int farb_index(const char *name) {
+  if (name == nullptr)
+    return -1;
+  const char *e = name;
+  while (*e != '\0' && *e != ' ')
+    e++;
+  for (const Farbname &f : FARBNAMEN)
+    if (wort_gleich(name, e, f.name))
+      return f.index;
+  return -1;
+}
+
+namespace {
+/// Kanal fuer Kanal mit `faktor` (0..1 je Kanal, als 0xRRGGBB/255), dann so
+/// gestreckt, dass der staerkste Kanal so hoch bleibt wie vorher - reine
+/// Farben bleiben voll hell, nur Mischungen verschieben sich.
+uint32_t kanalweise(uint32_t rgb, const float f[3]) {
+  float k[3], vor = 0.0f, nach = 0.0f;
+  for (int i = 0; i < 3; i++) {
+    const float x = static_cast<float>((rgb >> (16 - 8 * i)) & 0xFF);
+    k[i] = x * f[i];
+    vor = x > vor ? x : vor;
+    nach = k[i] > nach ? k[i] : nach;
+  }
+  if (!(nach > 0.0f))
+    return rgb & 0xFFFFFF;
+  uint32_t aus = 0;
+  for (int i = 0; i < 3; i++) {
+    float v = k[i] * vor / nach + 0.5f;
+    v = v > 255.0f ? 255.0f : v;
+    aus = (aus << 8) | static_cast<uint32_t>(v);
+  }
+  return aus;
+}
+}  // namespace
+
+uint32_t farbe_korrigiert(uint32_t rgb, uint32_t kal_weiss) {
+  const float f[3] = {((kal_weiss >> 16) & 0xFF) / 255.0f,
+                      ((kal_weiss >> 8) & 0xFF) / 255.0f, (kal_weiss & 0xFF) / 255.0f};
+  return kanalweise(rgb, f);
+}
+
+uint32_t farbe_unkorrigiert(uint32_t rgb, uint32_t kal_weiss) {
+  float f[3];
+  for (int i = 0; i < 3; i++) {
+    const uint32_t w = (kal_weiss >> (16 - 8 * i)) & 0xFF;
+    f[i] = 255.0f / static_cast<float>(w > 0 ? w : 1);
+  }
+  return kanalweise(rgb, f);
+}
+
+bool farbe_lesen(const char *text, uint32_t *farbe, const uint32_t *kal) {
   if (text == nullptr || farbe == nullptr)
     return false;
   while (*text == ' ')
@@ -901,7 +963,7 @@ bool farbe_lesen(const char *text, uint32_t *farbe, uint32_t weiss) {
     if (*r == '\0')
       for (const Farbname &f : FARBNAMEN)
         if (wort_gleich(text, e, f.name)) {
-          *farbe = f.farbe == 0xFFD764 ? (weiss & 0xFFFFFF) : f.farbe;
+          *farbe = (kal != nullptr ? kal[f.index] : FARB_VORGABE[f.index]) & 0xFFFFFF;
           return true;
         }
   }
@@ -1288,6 +1350,27 @@ bool wlan_auftrag_lesen(const std::string &daten, std::string *ssid, std::string
   *ssid = s;
   *pass = p;
   return true;
+}
+
+int rad_feld(int32_t position, int32_t rev, int felder) {
+  return static_cast<int>(static_cast<int64_t>(normiere(position, rev)) * felder / rev);
+}
+
+int rad_farbindex(int feld) {
+  static const char *const NAMEN[RAD_FELDER_MAX] = {"rot", "blau", "gruen", "gelb"};
+  return farb_index(NAMEN[feld >= 0 && feld < RAD_FELDER_MAX ? feld : 0]);
+}
+
+float rad_anfangstempo(float wunsch, float tempo_max, float streuung, uint32_t zufall) {
+  const float v = wunsch < tempo_max ? wunsch : tempo_max;
+  const float z = static_cast<float>(zufall) / 4294967295.0f;  // 0..1
+  return v * (1.0f + streuung * (2.0f * z - 1.0f));
+}
+
+float rad_tempo(float v0, uint32_t t_ms, float konstant, float zaeh) {
+  const float grenze = konstant / zaeh;
+  const float v = (v0 + grenze) * std::exp(-zaeh * static_cast<float>(t_ms) / 1000.0f) - grenze;
+  return v > 0.0f ? v : 0.0f;
 }
 
 }  // namespace starwatch

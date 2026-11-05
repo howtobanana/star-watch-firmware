@@ -216,6 +216,19 @@ int32_t Antrieb::position() const {
   return motor_->getCurrentPosition();
 }
 
+void Antrieb::drehen(uint32_t milli_hz, bool vorwaerts) {
+  if (motor_ == nullptr)
+    return;
+  motor_->setAcceleration(beschleunigung_);
+  motor_->setLinearAcceleration(0);
+  stopp_angefordert_ = false;
+  tempo_mhz(milli_hz);
+  if (vorwaerts)
+    motor_->runForward();
+  else
+    motor_->runBackward();
+}
+
 int32_t Antrieb::ziel() const {
   if (motor_ == nullptr)
     return 0;

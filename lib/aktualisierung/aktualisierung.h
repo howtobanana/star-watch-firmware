@@ -141,16 +141,14 @@ class Aktualisierung {
   /// ueberhaupt scharf ist.
   std::string partition_text() const;
 
+  /// Immer automatisch (27.10.2026) - siehe beginn().
   Updatemodus modus() const { return modus_; }
-  void modus(Updatemodus m);
 
   const std::string &url() const { return url_; }
   void url(const std::string &u);
 
   /// Aus der URL abgelesen, nicht gespeichert.
   Updatekanal kanal() const;
-  /// Setzt die zum Kanal gehoerende URL. `eigen` tut nichts - dafuer `url()`.
-  void kanal(Updatekanal k);
 
   Updatestand stand() const { return stand_; }
   const std::string &meldung() const { return meldung_; }
@@ -165,7 +163,7 @@ class Aktualisierung {
                    const std::string &sha_soll);
 
   const char *version_ = "0.0.0";
-  Updatemodus modus_ = Updatemodus::aus;
+  Updatemodus modus_ = Updatemodus::automatisch;
   Updatestand stand_ = Updatestand::unbekannt;
   std::string url_;
   std::string meldung_;

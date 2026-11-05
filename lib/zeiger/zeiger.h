@@ -580,13 +580,34 @@ float tastverhaeltnis(float prozent, float min_prozent);
 
 /// Farbe aus Text, als 0xRRGGBB. Nimmt "#ff8800", "ff8800", "255 136 0" und
 /// die Namen rot, gruen, blau, gelb, violett, weiss, orange, tuerkis (auch
-/// mit Umlaut, Gross/klein egal). "weiss" ist das Weiss DIESER Uhr
-/// (`weiss`, 'lw'), denn die LEDs streuen von Uhr zu Uhr (27.10.2026).
+/// mit Umlaut, Gross/klein egal). Ein Name liefert den Wert aus `kal` -
+/// der Werkskalibrierung DIESER Uhr, FARBEN_KAL Eintraege in der Reihenfolge
+/// von farb_schluessel() - oder ohne `kal` die Vorgabe (27.10.2026).
 ///
 /// Gibt false zurueck und laesst `farbe` UNBERUEHRT, wenn der Text keine
 /// Farbe ist. Ein Vertipper soll nichts veraendern - eine halb gelesene
 /// Farbe waere ein Kanal auf null und saehe aus wie ein kaputter Treiber.
-bool farbe_lesen(const char *text, uint32_t *farbe, uint32_t weiss = 0xFFD764);
+bool farbe_lesen(const char *text, uint32_t *farbe, const uint32_t *kal = nullptr);
+
+/// WERKSKALIBRIERUNG DER FARBEN (27.10.2026). Die festen Farben, je Uhr
+/// eingestellt, weil die drei LEDs von Uhr zu Uhr streuen.
+constexpr int FARBEN_KAL = 8;
+/// "rot" "orange" "gelb" "gruen" "tuerkis" "blau" "violett" "weiss"
+const char *farb_schluessel(int i);
+/// Fuer die Anzeige, mit Umlauten.
+const char *farb_name(int i);
+/// Abgestimmt an C4E8 - gilt, solange eine Uhr nicht kalibriert ist.
+uint32_t farb_vorgabe(int i);
+/// Index zu einem Namen (auch mit Umlaut, Gross/klein egal), sonst -1.
+int farb_index(const char *name);
+
+/// FREIE FARBEN (Home Assistant) ueber das kalibrierte Weiss mitkorrigieren:
+/// je Kanal mit Weiss/255, dann so gestreckt, dass der staerkste Kanal bleibt.
+/// ffffff wird so genau zum kalibrierten Weiss, reine Farben bleiben voll.
+uint32_t farbe_korrigiert(uint32_t rgb, uint32_t kal_weiss);
+/// Rueckweg fuer die Meldung an Home Assistant - sonst korrigierte es beim
+/// naechsten Senden die schon korrigierte Farbe ein zweites Mal.
+uint32_t farbe_unkorrigiert(uint32_t rgb, uint32_t kal_weiss);
 
 /// Tastverhaeltnis je Kanal aus dem Gesamtanteil (tastverhaeltnis()) und der
 /// Farbe, begrenzt auf eine LEISTUNG. `aus[0]` rot, `aus[1]` gruen,
@@ -816,6 +837,43 @@ class Nachtschalter {
   bool wechsel_angemeldet_ = false;  ///< Messwert liegt jenseits der Schwelle
   uint32_t wechsel_seit_ = 0;
 };
+
+// ===========================================================================
+// Gluecksrad: Spieler auslosen (05.11.2026)
+// ===========================================================================
+//
+// Der Zeiger wird wie ein Rad angeschubst und laeuft aus. Die Uhr ist dabei in
+// gleich grosse Felder geteilt, das erste beginnt auf zwoelf, weiter im
+// Uhrzeigersinn; bei zwei Feldern ist rechts Rot und links Blau.
+
+constexpr int RAD_FELDER_MIN = 2;
+constexpr int RAD_FELDER_MAX = 4;
+
+/// Feld, in dem `position` liegt: 0 .. felder-1, ab zwoelf im Uhrzeigersinn.
+int rad_feld(int32_t position, int32_t rev, int felder);
+
+/// Farbe eines Felds: rot, blau, gruen, gelb. Als Index fuer farb_schluessel(),
+/// damit die Werkskalibrierung der Uhr gilt.
+int rad_farbindex(int feld);
+
+/// Anfangstempo in Schritten/s aus dem Tempo des Wischs.
+///
+/// Der Zufall kommt erst NACH der Begrenzung, sonst liefe jeder kraeftige Wisch
+/// genau gleich weit. `zufall` streut um +- `streuung` (Anteil). Bei kraeftigem
+/// Schwung sind das mehr als eine ganze Umdrehung: das Ergebnis ist dann nicht
+/// mehr zielbar. Ein ganz leichter Schubs bleibt bewusst zielbar wie am echten
+/// Rad, er kommt ja kaum ueber sein Feld hinaus.
+float rad_anfangstempo(float wunsch, float tempo_max, float streuung, uint32_t zufall);
+
+/// Tempo `t_ms` nach dem Anschub, in Schritten/s; 0, wenn das Rad steht.
+///
+/// Zwei Bremsen wie am echten Rad: `konstant` (Lagerreibung, Schritte/s^2)
+/// und `zaeh` (Luft und Fett, 1/s, waechst mit dem Tempo).
+///     dv/dt = -(konstant + zaeh * v)
+/// Der zaehe Anteil nimmt schnell Tempo weg und laesst dem Rad am Ende einen
+/// langen, langsamen Auslauf. Nur konstante Reibung (so bremst die Rampe des
+/// Motors von selbst) endet abrupt und wirkt wie ein Motor, nicht wie ein Rad.
+float rad_tempo(float v0, uint32_t t_ms, float konstant, float zaeh);
 
 // ===========================================================================
 // Einrichtung per Bluetooth (23.10.2026)

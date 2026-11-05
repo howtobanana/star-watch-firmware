@@ -3,9 +3,14 @@
 Hier liegt, was eine ausgelieferte Uhr sich selbst holt:
 
 ```
-manifest.json        Kanal stabil — verschenkte Uhren
-manifest-beta.json   Kanal beta   — die eigene Uhr
+manifest.json        das eine Manifest — alle Uhren
 ```
+
+**Einen Beta-Kanal gibt es nicht** (seit 0.30.0, 27.10.2026). Jede Uhr holt
+ihre Updates **automatisch**, einmal täglich gegen 3 Uhr; ausschalten lässt
+sich das nicht. Von Hand geht es nur **früher**: Karte „Firmware“ in der
+Weboberfläche oder `yp`/`yi`. Eine Uhr, die noch auf `manifest-beta.json`
+stand, stellt sich mit 0.30.0 selbst auf `manifest.json` um.
 
 Signiert wird im **Schema `starwatch-fw-3`** (seit 28.09.2026). Das Schema
 ist zugleich die Hardware-Prüfung: die Alpha-Platinen kennen fw-3 nicht und
@@ -67,8 +72,7 @@ erreichbar bleiben:
       --mindest 0.9.0 \
       --aus ../../Star-Watch-Firmware/updates/manifest.json
 
-Für eine Vorabfassung dasselbe mit `--aus …/manifest-beta.json`. Die
-Version muss `MAJOR.MINOR.PATCH` sein — `signieren.py` weist Anhängsel wie
+Die Version muss `MAJOR.MINOR.PATCH` sein — `signieren.py` weist Anhängsel wie
 `-beta1` ab.
 
 **6. Gegenprobe** — macht genau das, was die Uhr macht:
@@ -87,15 +91,11 @@ Version muss `MAJOR.MINOR.PATCH` sein — `signieren.py` weist Anhängsel wie
 
 ---
 
-## Welche Uhr welchen Kanal liest
+## Was die Uhr dazu sagt
 
-    yk s    stabil — so gehen Uhren aus dem Haus
-    yk b    beta   — nur die eigene
-    y       zeigt Modus, Kanal und Manifest-URL
-
-Der Kanal ist **kein eigener Speicherwert**: er wird aus der Manifest-URL
-abgelesen. Damit kann es keine Uhr geben, die „beta" gespeichert hat, aber auf
-das stabile Manifest zeigt.
+    y       zeigt Fassung, Partition, letzten Stand und Manifest-URL
+    yp      jetzt nachsehen
+    yi      gefundene Fassung einspielen
 
 ## Was `--mindest` bedeutet
 

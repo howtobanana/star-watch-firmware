@@ -20,6 +20,8 @@ namespace {
 /// aufsummieren, weil jeder Durchlauf die Sollposition NEU aus der Uhrzeit
 /// rechnet und nicht aus dem letzten Ergebnis.
 constexpr uint32_t UHR_TAKT_MS = 5000;
+/// So oft wird das Tempo des auslaufenden Gluecksrads nachgefuehrt.
+constexpr uint32_t RAD_TAKT_MS = 20;
 
 /// Steht der Zeiger bis zu so vielen Schritten VOR der Zeit, wird gewartet,
 /// statt eine ganze Umdrehung nachzufahren.
@@ -82,7 +84,10 @@ const char *K_OFFSET = "hall_offset";
 const char *K_OTA_PW = "ota_pw";
 const char *K_AP_PW = "ap_pw";
 const char *K_TOKEN = "token";
-const char *K_WEISS = "weiss";  // 0xRRGGBB, Weiss dieser Uhr
+/// Nur noch zum Uebernehmen: 0.28/0.29 kannten EIN Weiss je Uhr ('lw').
+const char *K_WEISS = "weiss";
+/// Die Werkskalibrierung, FARBEN_KAL x uint32 als Block.
+const char *K_FARB_KAL = "farb_kal";
 /// Zaehler der Stromzyklen. Im FERTIGUNGSbereich, damit ihn ein Werksreset
 /// nicht selbst loescht - sonst zaehlte der Reset seinen eigenen Zaehler weg.
 const char *K_ZYKLEN = "zyklen";
@@ -176,7 +181,16 @@ void Betrieb::beginn(Antrieb *antrieb, Hall *hall, Licht *licht) {
 
   nvs.begin(NVS_FERTIGUNG, false);
   hall_offset_ = nvs.getInt(K_OFFSET, 0);
-  weiss_ = nvs.getUInt(K_WEISS, g::LED_WEISS_VORGABE) & 0xFFFFFF;
+  for (int i = 0; i < FARBEN_KAL; i++)
+    kal_[i] = farb_vorgabe(i);
+  if (nvs.getBytesLength(K_FARB_KAL) == sizeof(kal_)) {
+    nvs.getBytes(K_FARB_KAL, kal_, sizeof(kal_));
+  } else if (nvs.isKey(K_WEISS)) {
+    kal_[FARBEN_KAL - 1] = nvs.getUInt(K_WEISS, farb_vorgabe(FARBEN_KAL - 1)) & 0xFFFFFF;
+    nvs.putBytes(K_FARB_KAL, kal_, sizeof(kal_));
+  }
+  for (uint32_t &k : kal_)
+    k &= 0xFFFFFF;
   identitaet_laden();
 
   {
@@ -556,9 +570,11 @@ void Betrieb::hall_offset(int32_t schritte) {
   offset_setzen(schritte);
 }
 
-void Betrieb::weiss(uint32_t rgb) {
-  weiss_ = rgb & 0xFFFFFF;
-  nvs.putUInt(K_WEISS, weiss_);
+void Betrieb::farb_kal(int i, uint32_t rgb) {
+  if (i < 0 || i >= FARBEN_KAL)
+    return;
+  kal_[i] = rgb > 0xFFFFFF ? farb_vorgabe(i) : rgb;
+  nvs.putBytes(K_FARB_KAL, kal_, sizeof(kal_));
 }
 
 void Betrieb::offset_setzen(int32_t schritte) {
@@ -682,6 +698,8 @@ Homingergebnis Betrieb::referenzfahrt(Hall::Pumpe pumpe, Hominganlass anlass) {
   // Timer und Uhrbetrieb aus: die Referenzfahrt hat Vorrang, und wer ihr in
   // den Zaehler schreibt, macht das Ergebnis wertlos. Im Pruefstand steht
   // diese Regel als Hinweistext an der Oberflaeche.
+  rad_abbrechen();
+  rad_referenz_ = false;  // diese Fahrt raeumt das Riemenspiel gerade weg
   timer_abbrechen();
   const Zeitmodus vorher = zeitmodus_;
   zeitmodus_ = Zeitmodus::aus;
@@ -805,6 +823,7 @@ bool Betrieb::timer_starten(uint32_t sekunden, uint32_t epoch_jetzt) {
 
   // Der Uhrbetrieb wird ausgeschaltet: beide brauchen den Zeiger als Anzeige,
   // und die Kollisionsregel sagt, dass die letzte Aktion gewinnt.
+  rad_abbrechen();
   zeitmodus_ = Zeitmodus::aus;
   timer_dauer_ms_ = sekunden * 1000u;
   if (epoch_jetzt > 0)
@@ -1059,7 +1078,113 @@ void Betrieb::timer_springen(uint32_t verstrichen_ms) {
 /// Gemeinsamer Teil jedes Handeingriffs: den Uhrbetrieb beenden. Steht hier
 /// EINMAL, damit kein Fahrweg von aussen daran vorbeikommt - die Begruendung
 /// steht bei den Deklarationen in betrieb.h.
+// --- Gluecksrad -------------------------------------------------------------
+
+const char *Betrieb::rad_anschubsen(int felder, float grad_je_s, uint32_t zufall) {
+  if (antrieb_ == nullptr || licht_ == nullptr)
+    return "kein Antrieb";
+  if (felder < RAD_FELDER_MIN || felder > RAD_FELDER_MAX)
+    return "2, 3 oder 4 Felder";
+  if (!referenz_gueltig_)
+    return "ohne Referenz waere das Feld geraten";
+  if (homing_laeuft_)
+    return "Referenzfahrt laeuft";
+  // Einen Timer bricht ein Wisch nicht ab: den sieht man auf der Uhr nicht wieder.
+  if (timer_laeuft())
+    return "Timer laeuft";
+  const float wunsch = std::fabs(grad_je_s) * g::RAD_WISCH_FAKTOR * g::REV / 360.0f;
+  if (wunsch < g::RAD_TEMPO_MIN)
+    return "zu wenig Schwung";
+
+  const bool laeuft_schon = rad_phase_ == Radphase::laeuft;
+  rad_felder_ = felder;
+  rad_v0_ = rad_anfangstempo(wunsch, g::RAD_TEMPO_MAX, g::RAD_STREUUNG, zufall);
+  rad_ab_ms_ = millis();
+  rad_takt_ms_ = rad_ab_ms_;
+  if (!laeuft_schon) {
+    rad_vorwaerts_ = grad_je_s > 0.0f;
+    zeitmodus_ = Zeitmodus::aus;
+    rueckfall_sperren();
+    rad_feld_ = -1;  // die Farbe kommt mit dem naechsten rad_tick
+    rad_phase_ = Radphase::laeuft;
+  }
+  rad_tempo_ = static_cast<int32_t>(rad_vorwaerts_ ? rad_v0_ : -rad_v0_);
+  antrieb_->drehen(static_cast<uint32_t>(rad_v0_ * 1000.0f), rad_vorwaerts_);
+  return nullptr;
+}
+
+void Betrieb::rad_farbe_zeigen(Muster m) {
+  licht_->signal(Licht::Ebene::zustand, kal_[rad_farbindex(rad_feld_)], m, -1.0f, 0);
+}
+
+void Betrieb::rad_tick() {
+  if (rad_phase_ == Radphase::aus)
+    return;
+  const uint32_t jetzt = millis();
+
+  if (rad_phase_ == Radphase::blinkt) {
+    if (jetzt - rad_ab_ms_ < g::RAD_BLINKEN_MS)
+      return;
+    licht_->signal_aus(Licht::Ebene::zustand);
+    rad_phase_ = Radphase::aus;
+    rueckfall_freigeben();
+    if (rad_vorwaerts_)
+      rueckfall_sofort();
+    else
+      rad_referenz_ = true;
+    return;
+  }
+
+  const int32_t pos = antrieb_->position() + (rad_vorwaerts_ ? 0 : g::RAD_SPIEL_RUECKWAERTS);
+  const int feld = rad_feld(pos, g::REV, rad_felder_);
+  if (feld != rad_feld_) {
+    rad_feld_ = feld;
+    rad_farbe_zeigen(Muster::leuchten);
+  }
+
+  // Die Bremse ist hier schon gezogen: ankommen lassen, dann steht das Ergebnis.
+  if (rad_tempo_ == 0) {
+    if (antrieb_->laeuft())
+      return;
+    rad_farbe_zeigen(Muster::blinken);
+    rad_phase_ = Radphase::blinkt;
+    rad_ab_ms_ = jetzt;
+    return;
+  }
+
+  if (jetzt - rad_takt_ms_ < RAD_TAKT_MS)
+    return;
+  rad_takt_ms_ = jetzt;
+  const float v = rad_tempo(rad_v0_, jetzt - rad_ab_ms_, g::RAD_REIBUNG, g::RAD_ZAEHIGKEIT);
+  if (v < g::RAD_TEMPO_ENDE) {
+    rad_tempo_ = 0;
+    antrieb_->stopp_mit_rampe();
+    return;
+  }
+  antrieb_->tempo_mhz(static_cast<uint32_t>(v * 1000.0f));
+  rad_tempo_ = static_cast<int32_t>(rad_vorwaerts_ ? v : -v);
+}
+
+void Betrieb::rad_abbrechen() {
+  if (rad_phase_ == Radphase::aus)
+    return;
+  const bool lief = rad_phase_ == Radphase::laeuft;
+  rad_phase_ = Radphase::aus;
+  rad_tempo_ = 0;
+  licht_->signal_aus(Licht::Ebene::zustand);
+  rueckfall_freigeben();
+  rad_referenz_ = !rad_vorwaerts_;
+  if (!lief)
+    return;
+  // Warten, bis er steht: wer jetzt uebernimmt, rechnet mit antrieb_->ziel(),
+  // und das stimmt erst danach. Aus vollem Lauf dauert das 0,25 s.
+  antrieb_->stopp_mit_rampe();
+  while (antrieb_->laeuft())
+    delay(5);
+}
+
 bool Betrieb::hand_uebernimmt() {
+  rad_abbrechen();
   if (zeitmodus_ == Zeitmodus::aus)
     return false;
   zeitmodus_ = Zeitmodus::aus;
@@ -1144,6 +1269,7 @@ bool Betrieb::auf_zwoelf_halten() {
 }
 
 void Betrieb::stopp() {
+  rad_abbrechen();
   timer_abbrechen();
   zeitmodus_ = Zeitmodus::aus;
   if (antrieb_ != nullptr)
@@ -1286,6 +1412,7 @@ void Betrieb::tick() {
   if (hall_ != nullptr && antrieb_ != nullptr)
     hall_->tick(antrieb_->position());
 
+  rad_tick();
   timer_tick();
   // Timerfarbe zuruecknehmen, sobald Timer UND Alarm vorbei sind. Der Alarm
   // ist ein Effekt; solange er laeuft, bleibt die Klinge orange.

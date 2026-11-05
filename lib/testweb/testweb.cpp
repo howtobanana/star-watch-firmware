@@ -406,6 +406,10 @@ h2{font-size:10px;text-transform:uppercase;letter-spacing:.26em;color:var(--w3);
    Vorher stand am Desktop "> .k:first-child > svg{max-width:340px}" - das
    erste Kind ist aber die Ueberschrift, die Regel griff also nie. */
 .k.blatt{position:relative;container-type:size;aspect-ratio:3/4}
+#uhr.rad{touch-action:none;cursor:grab}
+/* Auf dem Handy direkt unter das Blatt: beim Wischen braucht man beides im Blick. */
+.k.blatt{order:-2}
+#k_rad{order:-1}
 #uhr{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
  display:block;width:min(63cqh,86cqw)}
 @media(min-width:760px){
@@ -413,6 +417,7 @@ h2{font-size:10px;text-transform:uppercase;letter-spacing:.26em;color:var(--w3);
  .g.uhr > .k:first-child{grid-row:span 2}
  /* min-height faengt eine kurze rechte Spalte ab. */
  .g.uhr > .k.blatt{aspect-ratio:auto;min-height:460px}
+ #k_rad{order:0}
 }
 
 /* EIN Knopfstil. Zustand zeigt der Schein, nicht Farbe oder Flaeche. */
@@ -839,6 +844,7 @@ M3.5 3.5l1.6 1.6M14.9 14.9l1.6 1.6M16.5 3.5l-1.6 1.6M5.1 14.9l-1.6 1.6"/></svg>
   </filter>
  </defs>
  <g id="u_striche" filter="url(#u_wglow)"></g>
+ <g id="u_rad" fill="none" stroke-width="2"></g>
  <!-- Nullpunkt und Sensorfenster sind LINIEN wie alles andere - gleiche
       Strichbreite, durchgehend, ohne Punkt am Ende. Ein gefuellter Kreis und
       ein 5 px breiter Bogen waren Flaechen. -->
@@ -890,14 +896,26 @@ M3.5 3.5l1.6 1.6M14.9 14.9l1.6 1.6M16.5 3.5l-1.6 1.6M5.1 14.9l-1.6 1.6"/></svg>
 <div class="row"><span class="sl"><span class="kz"><span class="lb">Blau</span><span class="tr">//</span><span class="w" id="fb_w">&mdash;</span></span>
 <input type="range" id="fb" min="0" max="255" step="1" style="--n:4;--pk:#3a7bff" oninput="farbRegler()"></span></div>
 <div class="row"><span class="grp fa5">
-<button id="fa_ff0000" title="Rot" aria-label="Rot" onclick="farbeSetzen('ff0000')"><span class="fp" style="background:#ff0000"></span><span class="fw">Rot</span></button>
-<button id="fa_00ff00" title="Gr&uuml;n" aria-label="Gr&uuml;n" onclick="farbeSetzen('00ff00')"><span class="fp" style="background:#00ff00"></span><span class="fw">Gr&uuml;n</span></button>
-<button id="fa_0014ff" title="Blau" aria-label="Blau" onclick="farbeSetzen('0014ff')"><span class="fp" style="background:#0014ff"></span><span class="fw">Blau</span></button>
-<button id="fa_ff6e00" title="Gelb" aria-label="Gelb" onclick="farbeSetzen('ff6e00')"><span class="fp" style="background:#ff6e00"></span><span class="fw">Gelb</span></button>
-<button id="fa_9b00ff" title="Violett" aria-label="Violett" onclick="farbeSetzen('9b00ff')"><span class="fp" style="background:#9b00ff"></span><span class="fw">Violett</span></button>
-<button id="fa_weiss" title="Wei&szlig;" aria-label="Wei&szlig;" onclick="farbeSetzen(WEISS)"><span class="fp" style="background:#ffd764"></span><span class="fw">Wei&szlig;</span></button>
+<button id="fa_rot" title="Rot" aria-label="Rot" onclick="farbeSetzen(KAL.rot)"><span class="fp" style="background:#ff0000"></span><span class="fw">Rot</span></button>
+<button id="fa_gruen" title="Gr&uuml;n" aria-label="Gr&uuml;n" onclick="farbeSetzen(KAL.gruen)"><span class="fp" style="background:#00ff00"></span><span class="fw">Gr&uuml;n</span></button>
+<button id="fa_blau" title="Blau" aria-label="Blau" onclick="farbeSetzen(KAL.blau)"><span class="fp" style="background:#0014ff"></span><span class="fw">Blau</span></button>
+<button id="fa_gelb" title="Gelb" aria-label="Gelb" onclick="farbeSetzen(KAL.gelb)"><span class="fp" style="background:#ff6e00"></span><span class="fw">Gelb</span></button>
+<button id="fa_violett" title="Violett" aria-label="Violett" onclick="farbeSetzen(KAL.violett)"><span class="fp" style="background:#9b00ff"></span><span class="fw">Violett</span></button>
+<button id="fa_weiss" title="Wei&szlig;" aria-label="Wei&szlig;" onclick="farbeSetzen(KAL.weiss)"><span class="fp" style="background:#ffd764"></span><span class="fw">Wei&szlig;</span></button>
 </span></div>
-<div class="row"><button onclick="weissMerken()">als Wei&szlig; dieser Uhr merken</button></div>
+<details><summary>Werkskalibrierung</summary>
+<p class="hint">Die LEDs streuen von Uhr zu Uhr. Hier wird jede feste Farbe f&uuml;r
+DIESE Uhr eingestellt: w&auml;hlen, mit den Reglern oben abgleichen, speichern.
+Bleibt auch nach dem Werksreset. Freie Farben aus Home Assistant folgen dem Wei&szlig;.</p>
+<div class="row"><span class="sl"><span class="kz"><span class="lb">Farbe</span></span>
+<select id="kal_w" onchange="c('lk '+this.value)">
+<option value="rot">Rot</option><option value="orange">Orange</option>
+<option value="gelb">Gelb</option><option value="gruen">Gr&uuml;n</option>
+<option value="tuerkis">T&uuml;rkis</option><option value="blau">Blau</option>
+<option value="violett">Violett</option><option value="weiss">Wei&szlig;</option></select></span></div>
+<div class="row"><span class="grp"><button class="p" onclick="kalSpeichern()">speichern</button>
+<button onclick="kalVorgabe()">auf Vorgabe</button></span></div>
+<p class="hint" id="kal_m">&mdash;</p></details>
 <div class="row" id="fa_meld" style="display:none"><span class="grp">
 <span class="lage" style="align-self:center"><span class="fp" id="fa_mpt"></span><span id="fa_mtx">&mdash;</span></span>
 <button onclick="c('lm-')">quittieren</button></span></div>
@@ -996,6 +1014,12 @@ Timer l&auml;uft.</p>
  onchange="c('k '+this.value)"></span></div>
 <p class="hint">Schwung: volle Kreise vor dem Ziel. Fahrt dauert <b id="keff">&mdash;</b>.</p></div>
 
+<div class="k" id="k_rad"><h2>Gl&uuml;cksrad</h2>
+<div class="row"><span class="grp" style="flex:1">
+<button id="rad2" onclick="radWahl(2)">2</button><button id="rad3" onclick="radWahl(3)">3</button><button id="rad4" onclick="radWahl(4)">4</button>
+</span></div>
+<p class="hint" id="rad_m">Felder w&auml;hlen, dann das Zifferblatt anschubsen: Je schneller der Wisch, desto mehr Schwung.</p></div>
+
 </div></div>
 
 <!-- ===================== EINSTELLUNGEN ===================== -->
@@ -1069,16 +1093,8 @@ hei&szlig;t unver&auml;ndert</b>; es wird nie zur&uuml;ckgegeben.</p></div>
 
 <div class="k" id="k_fw"><h2>Firmware</h2>
 <div class="kopf"><div class="lage"><span id="fw_jetzt">&mdash;</span></div></div>
-<div class="row"><span class="sl"><span class="kz"><span class="lb">Kanal</span></span>
-<select id="fw_kanal" onchange="c('yk '+this.value)">
-<option value="s">stabil</option>
-<option value="b">beta &middot; Vorabfassungen</option>
-<option value="e" disabled>eigene Adresse</option></select></span></div>
-<div class="row"><span class="sl"><span class="kz"><span class="lb">Updates</span></span>
-<select id="fw_modus" onchange="c('y '+this.value)">
-<option value="0">aus</option>
-<option value="1">nur von Hand</option>
-<option value="2">automatisch, nachts</option></select></span></div>
+<p class="hint">Updates kommen von selbst, jede Nacht gegen 3 Uhr. Hier
+geht es nur fr&uuml;her.</p>
 <div class="row"><span class="grp"><button onclick="fwSuchen()">Nach Update suchen</button>
 <button class="p" id="fw_ein" style="display:none" onclick="fwEinspielen()">Jetzt aktualisieren</button></span></div>
 <p class="hint" id="fw_m">&mdash;</p></div>
@@ -1332,6 +1348,85 @@ function bogen(von, bis, rev, r){
  return 'M'+a[0].toFixed(1)+' '+a[1].toFixed(1)+' A'+r+' '+r+' 0 '+gross+' 1 '+
         b[0].toFixed(1)+' '+b[1].toFixed(1);
 }
+function zeigerStellen(b,rev){
+ const kf=pkt(b,rev,11.0), z=pkt(b,rev,90);
+ for(const id of ['u_zeiger','u_glow','u_glow2']){
+  $(id).setAttribute('x1',kf[0].toFixed(1)); $(id).setAttribute('y1',kf[1].toFixed(1));
+  $(id).setAttribute('x2',z[0].toFixed(1));  $(id).setAttribute('y2',z[1].toFixed(1));
+ }
+ // Der Griff ist ein Rechteck und wird GEDREHT, nicht neu gezeichnet. Seine
+ // Masse stehen fest im SVG; hier bewegt sich nur der Winkel.
+ $('u_griff').setAttribute('transform',
+  'rotate('+(b/rev*360).toFixed(2)+' 100 100)');
+}
+// --- Gluecksrad ----------------------------------------------------------
+// Rechnen tut die Uhr. Die Seite misst nur den Wisch und schickt sein Tempo.
+const RAD_FARBEN=[['rot','Rot'],['blau','Blau'],['gruen','Gr\u00fcn'],['gelb','Gelb']];
+let rad_n=0, rad_wisch=[], rad_stand=null, rad_timer=0, rad_ph=0;
+function radWahl(n){
+ rad_n=rad_n===n?0:n;
+ [2,3,4].forEach(x=>$('rad'+x).classList.toggle('an',x===rad_n));
+ $('uhr').classList.toggle('rad',rad_n>0);
+ radFelder();
+}
+function radFelder(){
+ // Unsichtbare Scheibe: ein SVG nimmt den Finger sonst nur auf einer gemalten
+ // Linie an, und ein Wisch, der daneben beginnt, kaeme nie bei radGriff an.
+ let h=rad_n?'<circle cx="100" cy="100" r="100" fill="transparent" stroke="none"/>':'';
+ for(let i=0;i<rad_n;i++){
+  // Ein Stueck Luft an den Grenzen, sonst laufen die Boegen ineinander.
+  const von=i*3200/rad_n+16, bis=(i+1)*3200/rad_n-16;
+  h+='<path d="'+bogen(von,bis,3200,99)+'" stroke="'+ledSicht(KAL[RAD_FARBEN[i][0]])+
+     '" vector-effect="non-scaling-stroke"/>';
+ }
+ $('u_rad').innerHTML=h;
+}
+function radWinkel(e){
+ const r=$('uhr').getBoundingClientRect(), x=e.clientX-r.left-r.width/2, y=e.clientY-r.top-r.height/2;
+ // Nahe der Mitte macht ein kleines Zittern einen grossen Winkel.
+ if(Math.hypot(x,y)<r.width*0.12)return null;
+ return Math.atan2(y,x)*180/Math.PI;
+}
+function radGriff(e){
+ if(!rad_n)return;
+ e.preventDefault();
+ $('uhr').setPointerCapture(e.pointerId);
+ rad_wisch=[];radZug(e);
+}
+function radZug(e){
+ if(!rad_n||!$('uhr').hasPointerCapture(e.pointerId))return;
+ const w=radWinkel(e);
+ if(w!==null)rad_wisch.push([performance.now(),w]);
+}
+// Zaehlt nur das letzte Stueck vor dem Loslassen: wer anhaelt und dann loslaesst,
+// hat keinen Schwung mehr gegeben.
+function radLos(e){
+ if(!rad_n)return;
+ const jetzt=performance.now(), s=rad_wisch.filter(x=>jetzt-x[0]<120);
+ rad_wisch=[];
+ if(s.length<2)return;
+ let weg=0;
+ for(let i=1;i<s.length;i++)weg+=((s[i][1]-s[i-1][1]+540)%360)-180;
+ const dt=(s[s.length-1][0]-s[0][0])/1000;
+ if(dt>0)c('R '+rad_n+' '+Math.round(weg/dt));
+}
+$('uhr').addEventListener('pointerdown',radGriff);
+$('uhr').addEventListener('pointermove',radZug);
+$('uhr').addEventListener('pointerup',radLos);
+// Zwischen zwei Abfragen weiterzeichnen: bei 4 U/s liegen sonst 90 Grad je 250 ms dazwischen.
+function radZeichnen(){
+ if(!rad_stand||!rad_stand.v)return;
+ zeigerStellen(rad_stand.b+rad_stand.v*(performance.now()-rad_stand.t)/1000,rad_stand.rev);
+ requestAnimationFrame(radZeichnen);
+}
+function radSehen(d){
+ const r=d.rad||{ph:0,v:0}, liefe=rad_stand&&rad_stand.v;
+ rad_ph=r.ph;
+ rad_stand=r.v?{b:d.blatt,v:r.v,t:performance.now(),rev:d.rev}:null;
+ if(r.v&&!liefe)requestAnimationFrame(radZeichnen);
+ if(r.ph&&!rad_timer)rad_timer=setTimeout(()=>{rad_timer=0;z()},250);
+ d.rad_text=r.ph===1?'Gl\u00fccksrad l\u00e4uft':r.ph===2?RAD_FARBEN[r.feld][1]+' gewinnt':'';
+}
 function blatt(d){
  const rev=d.rev;
  // DER ZEIGER IST EIN LICHTSCHWERT, kein Strich. Am Aufbau sitzt der
@@ -1352,15 +1447,8 @@ function blatt(d){
  // BEGINNT IM GRIFF (23.10.2026): die Muendung ist schraeg und endet auf der
 // kurzen Seite schon bei 11,9 - ab 15 klaffte dort eine Luecke. Der Griff
 // ist gefuellt und liegt darueber, der Anfang bleibt verdeckt.
-const kf=pkt(d.blatt,rev,11.0), z=pkt(d.blatt,rev,90);
- for(const id of ['u_zeiger','u_glow','u_glow2']){
-  $(id).setAttribute('x1',kf[0].toFixed(1)); $(id).setAttribute('y1',kf[1].toFixed(1));
-  $(id).setAttribute('x2',z[0].toFixed(1));  $(id).setAttribute('y2',z[1].toFixed(1));
- }
- // Der Griff ist ein Rechteck und wird GEDREHT, nicht neu gezeichnet. Seine
- // Masse stehen fest im SVG; hier bewegt sich nur der Winkel.
- $('u_griff').setAttribute('transform',
-  'rotate('+(d.blatt/rev*360).toFixed(2)+' 100 100)');
+ zeigerStellen(d.blatt,rev);
+ radSehen(d);
  // FARBE = ZUSTAND DER KLINGE. Aus ist hellgrau, an ist rot, und wie rot
  // sagt die tatsaechliche AUSGABE in Prozent - nicht der Reglerwert. Der
  // Unterschied ist der ganze Witz: waehrend eines Effekts oder einer
@@ -1399,8 +1487,6 @@ const kf=pkt(d.blatt,rev,11.0), z=pkt(d.blatt,rev,90);
  // Die Zahlen sind nicht geraten - drei Abstufungen wurden als Bild
  // gegeneinander gestellt; die kraeftigere brannte an der Nabe aus, die
  // schwaechere war unsichtbar.
- $('u_glow').setAttribute('x2',z[0].toFixed(1));
- $('u_glow').setAttribute('y2',z[1].toFixed(1));
  if(brennt){
   // Auch der Hof behaelt seine Farbe. Was sich aendert, ist wie stark und
   // wie weit er traegt.
@@ -1424,7 +1510,7 @@ const kf=pkt(d.blatt,rev,11.0), z=pkt(d.blatt,rev,90);
   $('u_fenster').style.opacity=1}
  else $('u_fenster').style.opacity=0;
  // Ziel nur waehrend der Fahrt.
- if(d.faehrt){const t=pkt(((d.ziel%rev)+rev)%rev,rev,84);
+ if(d.faehrt&&!rad_ph){const t=pkt(((d.ziel%rev)+rev)%rev,rev,84);
   $('u_ziel').setAttribute('x2',t[0].toFixed(1));
   $('u_ziel').setAttribute('y2',t[1].toFixed(1));
   $('u_ziel').style.opacity=1}
@@ -1434,6 +1520,7 @@ const kf=pkt(d.blatt,rev,11.0), z=pkt(d.blatt,rev,90);
  // ein laufender Timer sagt mehr als "der Motor faehrt", und ein Homing mehr
  // als beides.
  $('u_lage').textContent =
+   d.rad_text                     ? d.rad_text :
    d.fuehrung==='Homing'          ? 'Homing laeuft' :
    !d.timer.startsWith('aus')     ? 'Timer \u00b7 '+d.timer :
    d.faehrt                       ? 'faehrt auf '+d.ziel :
@@ -1476,7 +1563,8 @@ function blatt_holen(){
  }).catch(()=>{$('gb_blatt').textContent='nicht abrufbar'});
 }
 
-// FIRMWARE (27.10.2026). Suchen und Einspielen sind die Konsolenkommandos
+// FIRMWARE (27.10.2026). Updates sind immer automatisch und es gibt EINEN
+// Kanal; die Karte holt sie nur frueher. Suchen und Einspielen sind die Konsolenkommandos
 // 'yp' und 'yi' - die Uhr antwortet sofort und arbeitet danach; das Ergebnis
 // steht im Zustand (upd). Waehrend des Ladens schweigt der Webserver
 // (ruhe_hook), danach startet die Uhr neu - den Rest zeigt der Wartekasten.
@@ -1489,7 +1577,6 @@ function fwEinspielen(){const n=$('fw_ein').dataset.v||'';
  $('fw_m').textContent='L\u00e4dt '+n+' \u2026 Die Seite ist so lange still, danach startet die Uhr neu.';c('yi')}
 function fwZeigen(d){const u=d.upd;if(!u)return;
  $('fw_jetzt').textContent='Firmware '+d.fw+(u.bewaehrung?' \u00b7 auf Bew\u00e4hrung':'');
- stelle('fw_kanal',e=>e.value=u.kanal);stelle('fw_modus',e=>e.value=String(u.modus));
  const bereit=u.stand===2;$('fw_ein').style.display=bereit?'':'none';
  $('fw_ein').dataset.v=u.neu;$('fw_ein').textContent=bereit?'Jetzt auf '+u.neu+' aktualisieren':'Jetzt aktualisieren';
  $('fw_m').textContent=u.meldung||(u.stand===0?'Noch nicht gesucht.':'\u2014')}
@@ -1728,24 +1815,31 @@ let fa_bis=0, fa_letzt=0, fa_wunsch='';
 // ist 255/215/100 weiss und 255/128/0 gelb. Daher je Kanal ein Faktor, der
 // dieses Weiss auf 1/1/1 bringt, dann Gamma. Ohne das zeigte die Oberflaeche
 // das Weiss als Orange und das Gelb als Braunorange.
-// SEIT 27.10.2026 JE UHR: das Weiss steht in der Uhr ('lw'), und die
+// SEIT 27.10.2026 JE UHR: das Weiss steht in der Kalibrierung ('lk'), und die
 // Faktoren kommen aus ihm. An C4E8 ist es 255/215/100, an BE40 100/255/150.
-let WEISS='ffd764', LED_SICHT=[1,255/215,255/100];
-function weissSetzen(hex){if(hex===WEISS)return;WEISS=hex;const n=parseInt(hex,16);
- LED_SICHT=[n>>16&255,n>>8&255,n&255].map(x=>255/Math.max(x,1));farbFelder()}
-function weissMerken(){c('lw '+FA_REG.map(id=>(+$(id).value).toString(16).padStart(2,'0')).join(''))}
+// SEIT 27.10.2026 KALIBRIERT JEDE UHR IHRE FARBEN SELBST ('lk', Zustand
+// "kal"). Die Vorgaben hier gelten nur, bis der erste Zustand da ist.
+let KAL={rot:'ff0000',orange:'ff3000',gelb:'ff6e00',gruen:'00ff00',tuerkis:'00ffff',
+ blau:'0014ff',violett:'9b00ff',weiss:'ffd764'}, LED_SICHT=[1,255/215,255/100];
+function kalSetzen(k){const n={};for(const x in k)n[x]=String(k[x]).replace('#','').toLowerCase();
+ if(JSON.stringify(n)===JSON.stringify(KAL))return;KAL=n;const w=parseInt(KAL.weiss,16);
+ LED_SICHT=[w>>16&255,w>>8&255,w&255].map(x=>255/Math.max(x,1));farbFelder();radFelder()}
+function reglerHex(){return FA_REG.map(id=>(+$(id).value).toString(16).padStart(2,'0')).join('')}
+function kalSpeichern(){const k=$('kal_w').value,h=reglerHex();c('lk '+k+' '+h);
+ $('kal_m').textContent=$('kal_w').selectedOptions[0].textContent+' = #'+h.toUpperCase()+' gespeichert.'}
+function kalVorgabe(){const k=$('kal_w').value;if(!confirm('Auf die Vorgabe zur\u00fccksetzen?'))return;
+ c('lk '+k+' -');$('kal_m').textContent='Zur\u00fcck auf die Vorgabe.'}
 function ledSicht(hex){const n=parseInt(String(hex).replace('#',''),16);
  return '#'+[n>>16&255,n>>8&255,n&255].map((x,i)=>Math.round(255*Math.pow(Math.min(1,x/255*LED_SICHT[i]),1/2.2))
   .toString(16).padStart(2,'0')).join('')}
 const FA_REG=['fr','fg','fb'];
 function farbAnzeigen(hex,regler){const n=parseInt(hex,16),k=[n>>16&255,n>>8&255,n&255];
  FA_REG.forEach((id,i)=>{if(regler)stelle(id,e=>e.value=k[i]);$(id+'_w').textContent=k[i]});
- ['ff0000','00ff00','0014ff','ff6e00','9b00ff'].forEach(x=>$('fa_'+x).classList.toggle('an',x===hex.toLowerCase()));
- $('fa_weiss').classList.toggle('an',WEISS===hex.toLowerCase())}
+ ['rot','gruen','blau','gelb','violett','weiss'].forEach(x=>$('fa_'+x).classList.toggle('an',KAL[x]===hex.toLowerCase()))}
 // Senden ohne Log-Nachladen: waehrend des Ziehens kaemen sonst Dutzende
 // Anfragen. Hoechstens alle 250 ms, und der LETZTE Wert geht immer raus.
 function farbFelder(){document.querySelectorAll('#k_farbe button[id^="fa_"] .fp').forEach(e=>{
- const id=e.parentNode.id.slice(3);e.style.background=ledSicht(id==='weiss'?WEISS:id)})}
+ const k=KAL[e.parentNode.id.slice(3)];if(k)e.style.background=ledSicht(k)})}
 farbFelder();
 // Knopf: mit Zuendung ('lf'). Regler: ohne ('lfr') - er schickt beim Ziehen
 // alle 250 ms einen Wert, und jeder wuerde die Zuendung neu anfangen lassen.
@@ -1852,7 +1946,7 @@ function z(){fetch('/test/zustand').then(r=>r.json()).then(d=>{
  // FARBE. Waehrend gezogen wird und kurz danach gewinnt die Hand - sonst
  // sprang der Regler auf den Wert der vorigen Antwort zurueck, bevor der
  // neue angekommen ist.
- if(/^#[0-9a-f]{6}$/i.test(d.weiss||'')) weissSetzen(d.weiss.slice(1).toLowerCase());
+ if(d.kal) kalSetzen(d.kal);
  fwZeigen(d);
  if(Date.now()>fa_bis && /^#[0-9a-f]{6}$/i.test(d.farbe||''))
   farbAnzeigen(d.farbe.slice(1),true);
@@ -2388,6 +2482,9 @@ String Testweb::zustand_json() {
   s += "\"zeigt\":\"" + String(zeigerzeit(pos, g::REV, g::SEK_JE_SCHRITT).c_str()) + "\",";
   s += "\"ziel\":" + String(antrieb_->ziel()) + ",";
   s += "\"faehrt\":" + String(antrieb_->laeuft() ? "true" : "false") + ",";
+  s += "\"rad\":{\"ph\":" + String(static_cast<int>(betrieb_->rad_phase())) +
+       ",\"feld\":" + String(betrieb_->rad_feld_jetzt()) +
+       ",\"v\":" + String(betrieb_->rad_tempo_jetzt()) + "},";
   s += "\"fuehrung\":\"" + String(wer) + "\",";
   s += "\"drift\":\"" +
        (soll < 0 ? String("-")
@@ -2487,10 +2584,16 @@ String Testweb::zustand_json() {
            "\",\"meldung\":\"" + json_text(aktiv_update_->meldung().c_str()) +
            "\",\"bewaehrung\":" + String(aktiv_update_->auf_bewaehrung() ? "true" : "false") + "},";
     }
-    // Weiss DIESER Uhr ('lw') - fuer den Weiss-Knopf und die App.
+    // WERKSKALIBRIERUNG dieser Uhr ('lk') - fuer die Farbknoepfe und die App.
+    // "weiss" einzeln bleibt fuer die App ab 0.28.
     if (betrieb_zeiger != nullptr) {
       snprintf(farbe, sizeof(farbe), "#%06lx", (unsigned long)betrieb_zeiger->weiss());
-      s += "\"weiss\":\"" + String(farbe) + "\",";
+      s += "\"weiss\":\"" + String(farbe) + "\",\"kal\":{";
+      for (int i = 0; i < FARBEN_KAL; i++) {
+        snprintf(farbe, sizeof(farbe), "#%06lx", (unsigned long)betrieb_zeiger->farb_kal(i));
+        s += String(i ? "," : "") + "\"" + farb_schluessel(i) + "\":\"" + farbe + "\"";
+      }
+      s += "},";
     }
     s += "\"zeige_proz\":" + String(licht_->zeige_prozent(), 1) + ",";
     const auto m = licht_->signal_zustand(Licht::Ebene::meldung);
@@ -2978,8 +3081,14 @@ void Testweb::log_tick() {
           // Absicht zeichnet, zeigt etwas, das es an der Wand nicht gibt.
           if (strcmp(puffer, "pz") == 0) {
             if (antrieb_ != nullptr)
-              log_client.printf("#p %ld %ld\n", (long)antrieb_->position(),
-                                (long)antrieb_->ziel());
+              // Ab 0.31.0 dahinter das Gluecksrad: Tempo, Phase, Feld - und was
+              // die Klinge zeigt, denn die Anzeige muss der Farbe im Lauf folgen.
+              log_client.printf("#p %ld %ld %ld %d %d %06lx %d\n", (long)antrieb_->position(),
+                                (long)antrieb_->ziel(), (long)betrieb_->rad_tempo_jetzt(),
+                                static_cast<int>(betrieb_->rad_phase()),
+                                betrieb_->rad_feld_jetzt(),
+                                (unsigned long)licht_->zeige_farbe(),
+                                static_cast<int>(licht_->zeige_prozent()));
             len = 0;
             zu_lang = false;
             continue;

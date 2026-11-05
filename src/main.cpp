@@ -28,6 +28,7 @@
 // AUSGABEN OHNE UMLAUTE - die Konsole ist nicht zuverlaessig auf UTF-8.
 // ---------------------------------------------------------------------------
 #include <Arduino.h>
+#include <esp_random.h>
 #include <esp_system.h>
 #include <Preferences.h>
 
@@ -204,6 +205,7 @@ void hilfe() {
       "ZWOELF EINMESSEN - drei Schritte, in dieser Reihenfolge\n"
       "  h           1. Homing: der Zeiger sucht seine Nulllage\n"
       "  hu          Homing, danach sofort die Uhrzeit (Ende des Steuerns)\n"
+      "  R <n> <g/s> Gluecksrad: n Felder, anschubsen mit g Grad/s\n"
       "  hf [f] [g]  Tempo der Referenzfahrt: Feinfahrt f, Grobsuche g (Schritte/s)\n"
       "  hv          Homing-Verlauf: Abweichungen und Offsetaenderungen, gespeichert\n"
       "  v <n>       2. auf zwoelf nachstellen, falls er daneben steht\n"
@@ -220,7 +222,7 @@ void hilfe() {
       "  l <p>       Helligkeit in Prozent (0 = aus)\n"
       "  la / lo     Klinge an / aus\n"
       "  lf [farbe]  Farbe der Klinge: lf ff8800, lf 255 136 0 oder lf gelb\n"
-      "  lw [farbe]  Weiss dieser Uhr (gespeichert, ueberlebt Werksreset)\n"
+      "  lk [name [farbe|-]]  Werkskalibrierung der Farben (ueberlebt Werksreset)\n"
       "              (zuendet neu und gleitet hinueber; 'lfr' ohne Zuendung)\n"
       "  lm <farbe> [muster] [dauer_s] [hell]  Meldung: leuchten|pulsieren|blinken\n"
       "  lm- / lm    Meldung quittieren / anzeigen\n"
@@ -250,7 +252,6 @@ void hilfe() {
       "  nx          gespeicherte Zugangsdaten vergessen\n"
       "GERAET\n"
       "  y           Firmware und Updates: Stand, Modus, URL\n"
-      "  y 0|1|2     Updates aus / manuell / automatisch (taeglich, nachts)\n"
       "  yp / yi     jetzt nachsehen / gefundene Fassung einspielen\n"
       "  y!          laufende Fassung von Hand bestaetigen (Pruefstand ohne Hall)\n"
       "  b           Neustart\n"
@@ -1066,6 +1067,20 @@ void kommando(char *z) {
       return;
     }
 
+    case 'R': {
+      // R <felder> <grad/s>: Gluecksrad anschubsen, Vorzeichen = Richtung.
+      int felder = 0;
+      float grad = 0.0f;
+      if (sscanf(rest, "%d %f", &felder, &grad) != 2) {
+        starwatch::konsole.println("R <felder 2..4> <grad/s>  Gluecksrad anschubsen, - = rueckwaerts");
+        return;
+      }
+      const char *grund = betrieb.rad_anschubsen(felder, grad, esp_random());
+      if (grund != nullptr)
+        starwatch::konsole.printf("Gluecksrad: %s.\n", grund);
+      return;
+    }
+
     case 'p': {
       if (z[1] == 's') {
         // ps <n>: laufend nachgeschobenes Ziel (21.10.2026). Fuer das Steuern
@@ -1184,36 +1199,14 @@ void kommando(char *z) {
         starwatch::konsole.printf("Manifest-URL: %s\n", aktualisierung.url().c_str());
         return;
       }
-      if (*rest == 'k') {
-        const char *arg = rest + 1;
-        while (*arg == ' ')
-          arg++;
-        if (*arg == 's')
-          aktualisierung.kanal(starwatch::Updatekanal::stabil);
-        else if (*arg == 'b')
-          aktualisierung.kanal(starwatch::Updatekanal::beta);
-        else if (*arg != '\0') {
-          starwatch::konsole.println("yk s | yk b   - stabil oder beta");
-          return;
-        }
-        starwatch::konsole.printf("Kanal: %s\n%s\n",
-                      starwatch::updatekanal_text(aktualisierung.kanal()),
-                      aktualisierung.url().c_str());
-        if (aktualisierung.kanal() == starwatch::Updatekanal::beta)
-          starwatch::konsole.println(
-              "BETA. Diese Uhr zieht Vorabfassungen. Fuer eine verschenkte Uhr\n"
-              "ist das die falsche Einstellung - dort gilt 'yk s'.");
-        return;
-      }
-      if (*rest >= '0' && *rest <= '2') {
-        aktualisierung.modus(static_cast<starwatch::Updatemodus>(*rest - '0'));
-        starwatch::konsole.printf("Updates: %s\n",
-                      starwatch::updatemodus_text(aktualisierung.modus()));
-        if (aktualisierung.modus() == starwatch::Updatemodus::automatisch)
-          starwatch::konsole.printf(
-              "Einmal taeglich gegen %d Uhr - nachts, weil die Uhr dabei STEHT\n"
-              "und danach ein Homing braucht. Nie waehrend eines Timers.\n",
-              g::UPDATE_STUNDE);
+      // Kanal und Modus gibt es nicht mehr (27.10.2026): ein Manifest,
+      // Updates immer automatisch. Die alten Kommandos sagen das, statt still
+      // in die Uebersicht zu fallen.
+      if (*rest == 'k' || (*rest >= '0' && *rest <= '2')) {
+        starwatch::konsole.printf(
+            "Updates laufen immer automatisch, einmal taeglich gegen %d Uhr.\n"
+            "Es gibt nur einen Kanal. Frueher holen: 'yp', dann 'yi'.\n",
+            g::UPDATE_STUNDE);
         return;
       }
       starwatch::konsole.printf(
@@ -1221,8 +1214,6 @@ void kommando(char *z) {
           "Partition: %s\n"
           "Stand: %s\n"
           "Manifest: %s\n\n"
-          "  y 0|1|2    aus / manuell / automatisch (taeglich)\n"
-          "  yk s|b     Kanal stabil oder beta\n"
           "  yp         jetzt nachsehen\n"
           "  yi         gefundene Fassung einspielen\n"
           "  yu <url>   Manifest-URL; ohne Wert nur anzeigen\n",
@@ -1797,7 +1788,7 @@ void kommando(char *z) {
           return;
         }
         uint32_t f = 0;
-        if (!starwatch::farbe_lesen(arg, &f, betrieb.weiss())) {
+        if (!starwatch::farbe_lesen(arg, &f, betrieb.farb_kal())) {
           starwatch::konsole.println("Keine Farbe. 'lf ff8800' oder 'lf 255 136 0'.");
           return;
         }
@@ -1877,7 +1868,7 @@ void kommando(char *z) {
             hell = strtof(p + 2, &ende);
             p = ende;
           } else if (p[0] == 'f' && p[1] == ' ') {
-            farbe_da = starwatch::farbe_lesen(p + 2, &farbe, betrieb.weiss());
+            farbe_da = starwatch::farbe_lesen(p + 2, &farbe, betrieb.farb_kal());
             if (!farbe_da) {
               starwatch::konsole.println("Keine Farbe. 'f ff8800' oder 'f 255 136 0'.");
               return;
@@ -1939,25 +1930,52 @@ void kommando(char *z) {
         licht.rampe();
         starwatch::konsole.println("Rampe 0-20 % in halben Prozent, 700 ms je Stufe (28 s).\n"
                        "Gesucht: ab welchem Wert glimmt sie? -> Messprotokoll.");
-      } else if (zweit == 'w') {
-        // lw [farbe] - Weiss DIESER Uhr (27.10.2026), gespeichert im
-        // Fertigungsbereich. Gilt fuer 'lf weiss', den Weiss-Knopf und die App.
-        // Leuchtet die Klinge gerade weiss, bekommt sie das neue gleich mit.
+      } else if (zweit == 'k') {
+        // WERKSKALIBRIERUNG DER FARBEN (27.10.2026), im Fertigungsbereich -
+        // ueberlebt den Werksreset. Die Klinge zeigt die Farbe dabei gleich.
+        //   lk                  alle acht Farben zeigen
+        //   lk <name>           diese Farbe an der Klinge zeigen
+        //   lk <name> <farbe>   kalibrieren und speichern
+        //   lk <name> -         zurueck auf die Vorgabe
+        // Leuchtet die Klinge gerade in der alten Fassung, bekommt sie die neue.
         const char *arg = arg2;
-        if (*arg != '\0') {
+        if (*arg == '\0') {
+          for (int i = 0; i < starwatch::FARBEN_KAL; i++)
+            starwatch::konsole.printf("  %-8s #%06lX%s\n", starwatch::farb_schluessel(i),
+                                      (unsigned long)betrieb.farb_kal(i),
+                                      betrieb.farb_kal(i) == starwatch::farb_vorgabe(i)
+                                          ? "  (Vorgabe)" : "");
+          return;
+        }
+        const int i = starwatch::farb_index(arg);
+        if (i < 0) {
+          starwatch::konsole.println("lk <rot|orange|gelb|gruen|tuerkis|blau|violett|weiss> [farbe|-]");
+          return;
+        }
+        const char *wert = arg;
+        while (*wert != '\0' && *wert != ' ')
+          wert++;
+        while (*wert == ' ')
+          wert++;
+        const uint32_t alt = betrieb.farb_kal(i);
+        if (*wert == '-') {
+          betrieb.farb_kal(i, 0xFFFFFFFFu);
+        } else if (*wert != '\0') {
           uint32_t f = 0;
-          if (!starwatch::farbe_lesen(arg, &f, betrieb.weiss())) {
-            starwatch::konsole.println("Keine Farbe. 'lw 64ff96' oder 'lw 100 255 150'.");
+          // Hier nur Hex oder "r g b" - ein Name waere die Farbe selbst.
+          if (starwatch::farb_index(wert) >= 0 || !starwatch::farbe_lesen(wert, &f)) {
+            starwatch::konsole.println("Keine Farbe. 'lk gelb ff9000' oder 'lk gelb 255 144 0'.");
             return;
           }
-          const bool war_weiss = licht.farbe() == betrieb.weiss();
-          betrieb.weiss(f);
-          if (war_weiss) {
-            licht.farbe(f);
-            betrieb.werte_sichern();
-          }
+          betrieb.farb_kal(i, f);
         }
-        starwatch::konsole.printf("Weiss dieser Uhr #%06lX.\n", (unsigned long)betrieb.weiss());
+        if (*wert == '\0' || licht.farbe() == alt) {
+          licht.farbe(betrieb.farb_kal(i));
+          betrieb.werte_sichern();
+        }
+        starwatch::konsole.printf("%s dieser Uhr #%06lX%s.\n", starwatch::farb_schluessel(i),
+                                  (unsigned long)betrieb.farb_kal(i),
+                                  betrieb.farb_kal(i) == starwatch::farb_vorgabe(i) ? " (Vorgabe)" : "");
       } else if (zweit == 't') {
         licht.treppe();
         starwatch::konsole.println("Treppe 0-100 % in Zehnerschritten, 3 s je Stufe (33 s).\n"
@@ -2510,7 +2528,8 @@ void referenzfahrt_nachholen(const char *warum, starwatch::Hominganlass anlass) 
 
 void referenzfahrt_pflege() {
   // Nichts anfassen, solange etwas anderes den Zeiger braucht.
-  if (langlauf || betrieb.timer_laeuft() || antrieb.laeuft())
+  if (langlauf || betrieb.timer_laeuft() || antrieb.laeuft() ||
+      betrieb.rad_phase() != starwatch::Betrieb::Radphase::aus)
     return;
   // Und nicht waehrend des Einmessens - dort haelt der Bediener die Lage
   // absichtlich fest.
@@ -2764,6 +2783,10 @@ void loop() {
   ntp_starten();
   ntp_nachstellen();
   betrieb.tick();
+  if (betrieb.rad_referenz_abholen()) {
+    char hu[] = "hu";
+    kommando(hu);
+  }
   ble_einrichtung_tick();
 
   // EINRICHTUNG SICHTBAR (23.10.2026): solange der offene Zugangspunkt steht,
@@ -2806,7 +2829,8 @@ void loop() {
   {
     struct tm t;
     const int stunde = getLocalTime(&t, 0) ? t.tm_hour : -1;
-    const bool ruhig = !betrieb.timer_laeuft() && !antrieb.laeuft() && !langlauf;
+    const bool ruhig = !betrieb.timer_laeuft() && !antrieb.laeuft() && !langlauf &&
+                       betrieb.rad_phase() == starwatch::Betrieb::Radphase::aus;
     aktualisierung.tick(stunde, ruhig);
   }
 

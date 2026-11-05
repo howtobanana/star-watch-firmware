@@ -132,6 +132,10 @@ class Antrieb {
   /// Wie fahre_weiter, aber weich - siehe fahre_weich_zu.
   void fahre_weich_weiter(int32_t schritte);
 
+  /// Ohne Ziel loslaufen (Gluecksrad). Das Tempo fuehrt tempo_mhz() nach, Ende
+  /// mit stopp_mit_rampe(). Anlauf mit der eingestellten Rampe.
+  void drehen(uint32_t milli_hz, bool vorwaerts);
+
   int32_t position() const;
   int32_t ziel() const;
   bool laeuft() const;

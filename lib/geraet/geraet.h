@@ -264,6 +264,27 @@ constexpr uint32_t TEMPO_UHR = REV / 8;
 /// zucken. Wer es haertet, misst wieder mit 'hv'.
 constexpr uint32_t TEMPO_STEUERN = 2 * REV;
 
+// GLUECKSRAD (05.11.2026). Der Lauf rechnet in lib/zeiger (rad_tempo).
+/// Hoechstes Anfangstempo: 4 U/s lassen die Haelfte Abstand zu TEMPO_MAX.
+constexpr float RAD_TEMPO_MAX = 4.0f * REV;
+/// Darunter war es kein Schubs, sondern ein Antippen.
+constexpr float RAD_TEMPO_MIN = 0.1f * REV;
+/// Hier stoppt der Lauf: langsam genug, dass das Anhalten nicht zu sehen ist.
+constexpr float RAD_TEMPO_ENDE = 20.0f;
+/// Wisch-Tempo auf dem Schirm -> Anfangstempo. Der Schirm ist kleiner als die Uhr.
+constexpr float RAD_WISCH_FAKTOR = 1.5f;
+/// Die zwei Bremsen, siehe rad_tempo. Mit diesen Werten: 0,25 U/s = 75 Grad in
+/// 1,7 s, 1 U/s = 2 Runden in 5 s, 4 U/s = 14 Runden in 10 s.
+constexpr float RAD_REIBUNG = 0.12f * REV;
+constexpr float RAD_ZAEHIGKEIT = 0.2f;
+/// Zufall auf das Anfangstempo, +- Anteil.
+constexpr float RAD_STREUUNG = 0.10f;
+/// So lange blinkt die Klinge in der Farbe des Siegers (Muster::blinken: 1 Hz).
+constexpr uint32_t RAD_BLINKEN_MS = 4000;
+/// Rueckwaerts haengt der Zeiger um das Riemenspiel (rund 7 Grad, siehe
+/// delta_vorwaerts) hinter dem Zaehler. Die Farbe soll zeigen, wo er WIRKLICH steht.
+constexpr int32_t RAD_SPIEL_RUECKWAERTS = REV * 7 / 360;
+
 /// Beschleunigung. Aus Tempo und gewuenschter Anlaufzeit GERECHNET, nicht
 /// getippt: aus dem Stand auf TEMPO_MAX in einer halben Sekunde. Der Weg
 /// dafuer ist v^2/(2a), also rund 1,5 Umdrehungen.
@@ -310,7 +331,7 @@ constexpr const char *GERAETETYP = "star-watch";
 /// neue Funktionen.
 ///
 /// 0.x heisst: noch nicht ausgeliefert.
-constexpr const char *FIRMWARE_VERSION = "0.29.3";
+constexpr const char *FIRMWARE_VERSION = "0.31.0";
 
 // ===========================================================================
 // UPDATES AUS DEM NETZ (AP 3.7.1)
@@ -793,11 +814,6 @@ constexpr float LED_MAX_W = LED_PD_DATENBLATT_W * LED_MAX_ANTEIL_PD;  // 2,85 W
 /// Farbe eines frischen Geraets und nach dem Werksreset: ROT - die Klinge
 /// eines Lichtschwerts. Als 0xRRGGBB.
 constexpr uint32_t LED_FARBE_VORGABE = 0xFF0000;
-
-/// WEISS EINER FRISCHEN UHR, 255/215/100 - abgestimmt an C4E8 (27.09.2026).
-/// Die drei LEDs streuen von Uhr zu Uhr; deshalb hat jede ihr eigenes Weiss
-/// im Fertigungsbereich des NVS ('lw', 27.10.2026; BE40: 100/255/150).
-constexpr uint32_t LED_WEISS_VORGABE = 0xFFD764;
 
 /// Untergrenze des Helligkeitsreglers in Prozent.
 /// ### GERATEN, MISST AP 0.5 ###

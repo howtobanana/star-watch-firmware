@@ -72,7 +72,6 @@ void tls_vorbereiten(WiFiClientSecure &c) {
 /// Schluessel.
 Preferences nvs;
 const char *NVS_BENUTZER = "sw_nutzer";
-const char *K_MODUS = "upd_modus";
 const char *K_URL = "upd_url";
 
 std::string hex(const uint8_t *b, size_t n) {
@@ -111,8 +110,10 @@ void Aktualisierung::beginn(const char *version) {
   start_ms_ = millis();
 
   nvs.begin(NVS_BENUTZER, false);
-  const uint8_t m = nvs.getUChar(K_MODUS, static_cast<uint8_t>(Updatemodus::aus));
-  modus_ = (m <= 2) ? static_cast<Updatemodus>(m) : Updatemodus::aus;
+  // UPDATES SIND IMMER AN UND AUTOMATISCH (Fabian, 27.10.2026). Von Hand
+  // geht es nur FRUEHER ('yp', 'yi', Karte "Firmware"), nie gar nicht. Ein
+  // gemerktes "aus" oder "manuell" aus aelteren Fassungen gilt nicht mehr.
+  modus_ = Updatemodus::automatisch;
   url_ = nvs.getString(K_URL, g::UPDATE_URL_VORGABE).c_str();
   if (url_.empty())
     url_ = g::UPDATE_URL_VORGABE;
@@ -128,6 +129,12 @@ void Aktualisierung::beginn(const char *version) {
   if (update_url_umstellen(&url_, g::UPDATE_ORDNER, g::UPDATE_URL_VORGABE,
                            g::UPDATE_URL_BETA))
     nvs.putString(K_URL, url_.c_str());
+  // EINEN BETA-KANAL GIBT ES NICHT MEHR (27.10.2026) - wer dort stand, kommt
+  // zurueck auf das eine Manifest.
+  if (url_ == g::UPDATE_URL_BETA) {
+    url_ = g::UPDATE_URL_VORGABE;
+    nvs.putString(K_URL, url_.c_str());
+  }
 
   // Laeuft dieses Image auf Bewaehrung? Dann darf es sich NICHT sofort
   // bestaetigen - siehe Kopf der Datei.
@@ -162,11 +169,6 @@ std::string Aktualisierung::partition_text() const {
   }
 }
 
-void Aktualisierung::modus(Updatemodus m) {
-  modus_ = m;
-  nvs.putUChar(K_MODUS, static_cast<uint8_t>(m));
-}
-
 void Aktualisierung::url(const std::string &u) {
   url_ = u.empty() ? std::string(g::UPDATE_URL_VORGABE) : u;
   nvs.putString(K_URL, url_.c_str());
@@ -178,14 +180,6 @@ Updatekanal Aktualisierung::kanal() const {
   if (url_ == g::UPDATE_URL_BETA)
     return Updatekanal::beta;
   return Updatekanal::eigen;
-}
-
-void Aktualisierung::kanal(Updatekanal k) {
-  switch (k) {
-    case Updatekanal::stabil: url(g::UPDATE_URL_VORGABE); break;
-    case Updatekanal::beta:   url(g::UPDATE_URL_BETA);    break;
-    case Updatekanal::eigen:  break;  // dafuer gibt es url()
-  }
 }
 
 void Aktualisierung::bewaehrt_melden() {

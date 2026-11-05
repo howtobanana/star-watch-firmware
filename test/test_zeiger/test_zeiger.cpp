@@ -1408,15 +1408,45 @@ void test_feldbreite_aus_den_punkten() {
 // ---------------------------------------------------------------------------
 // Lichtautomatik-Einstellungen (27.09.2026)
 // ---------------------------------------------------------------------------
-void test_weiss_ist_das_weiss_dieser_uhr() {
-  // "weiss" folgt der Uhr ('lw', 27.10.2026), ohne Angabe das von C4E8.
+void test_farbnamen_kommen_aus_der_kalibrierung() {
+  // Ohne Kalibrierung die Vorgaben, mit ihr die Werte DIESER Uhr (27.10.2026).
   uint32_t f = 0;
   TEST_ASSERT_TRUE(starwatch::farbe_lesen("weiss", &f));
   TEST_ASSERT_EQUAL_HEX32(0xFFD764, f);
-  TEST_ASSERT_TRUE(starwatch::farbe_lesen("Wei\xc3\x9f", &f, 0x64FF96));
+  uint32_t kal[starwatch::FARBEN_KAL];
+  for (int i = 0; i < starwatch::FARBEN_KAL; i++)
+    kal[i] = starwatch::farb_vorgabe(i);
+  kal[starwatch::farb_index("weiss")] = 0x64FF96;
+  kal[starwatch::farb_index("gelb")] = 0xFF9000;
+  TEST_ASSERT_TRUE(starwatch::farbe_lesen("Wei\xc3\x9f", &f, kal));
   TEST_ASSERT_EQUAL_HEX32(0x64FF96, f);
-  TEST_ASSERT_TRUE(starwatch::farbe_lesen("rot", &f, 0x64FF96));  // andere bleiben
+  TEST_ASSERT_TRUE(starwatch::farbe_lesen("GELB", &f, kal));
+  TEST_ASSERT_EQUAL_HEX32(0xFF9000, f);
+  TEST_ASSERT_TRUE(starwatch::farbe_lesen("rot", &f, kal));
   TEST_ASSERT_EQUAL_HEX32(0xFF0000, f);
+  TEST_ASSERT_TRUE(starwatch::farbe_lesen("ff8800", &f, kal));  // Hex bleibt Hex
+  TEST_ASSERT_EQUAL_HEX32(0xFF8800, f);
+  TEST_ASSERT_EQUAL_INT(3, starwatch::farb_index("gr\xc3\xbcn"));
+  TEST_ASSERT_EQUAL_INT(-1, starwatch::farb_index("pink"));
+  TEST_ASSERT_EQUAL_STRING("tuerkis", starwatch::farb_schluessel(4));
+}
+
+void test_freie_farben_folgen_dem_kalibrierten_weiss() {
+  // ffffff wird genau das kalibrierte Weiss, reine Farben bleiben voll.
+  TEST_ASSERT_EQUAL_HEX32(0x64FF96, starwatch::farbe_korrigiert(0xFFFFFF, 0x64FF96));
+  TEST_ASSERT_EQUAL_HEX32(0xFF0000, starwatch::farbe_korrigiert(0xFF0000, 0x64FF96));
+  TEST_ASSERT_EQUAL_HEX32(0x0000FF, starwatch::farbe_korrigiert(0x0000FF, 0x64FF96));
+  TEST_ASSERT_EQUAL_HEX32(0x000000, starwatch::farbe_korrigiert(0x000000, 0x64FF96));
+  // Halbes Grau bleibt halb so hell, nur im Ton verschoben.
+  TEST_ASSERT_EQUAL_HEX32(0x32804B, starwatch::farbe_korrigiert(0x808080, 0x64FF96));
+  // Rueckweg: was die Uhr zeigt, meldet sie Home Assistant wieder als das,
+  // was HA geschickt hat - sonst korrigierte es zweimal.
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFF, starwatch::farbe_unkorrigiert(0x64FF96, 0x64FF96));
+  const uint32_t ha = 0xFF8020;
+  const uint32_t zurueck = starwatch::farbe_unkorrigiert(
+      starwatch::farbe_korrigiert(ha, 0xFFD764), 0xFFD764);
+  for (int sh = 0; sh <= 16; sh += 8)
+    TEST_ASSERT_INT_WITHIN(3, (ha >> sh) & 0xFF, (zurueck >> sh) & 0xFF);
 }
 
 void test_lichtautomatik_vorgaben_bleiben_unveraendert() {
@@ -1692,6 +1722,90 @@ void test_wlan_auftrag_lesen() {
   TEST_ASSERT_FALSE(wlan_auftrag_lesen("Netz\n" + std::string(65, 'x'), &s, &p));
 }
 
+// --- Gluecksrad ------------------------------------------------------------
+namespace {
+// Dieselben Werte wie g::RAD_* in geraet.h (die Host-Tests binden geraet.h nicht ein).
+constexpr float RAD_KONSTANT = 0.12f * REV;
+constexpr float RAD_ZAEH = 0.2f;
+
+/// Weg bis zum Stillstand, im Takt der Firmware (20 ms) aufsummiert.
+float rad_weg(float v0) {
+  float weg = 0.0f;
+  for (uint32_t t = 0;; t += 20) {
+    const float v = rad_tempo(v0, t, RAD_KONSTANT, RAD_ZAEH);
+    if (v <= 0.0f)
+      return weg;
+    weg += v * 0.02f;
+  }
+}
+}  // namespace
+
+void test_rad_feld_ab_zwoelf_im_uhrzeigersinn() {
+  // Zwei Felder: 12-6 Uhr rechts, 6-12 Uhr links. Genau auf 6 beginnt das zweite.
+  TEST_ASSERT_EQUAL_INT(0, rad_feld(0, REV, 2));
+  TEST_ASSERT_EQUAL_INT(0, rad_feld(1599, REV, 2));
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(1600, REV, 2));
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(3199, REV, 2));
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(1067, REV, 3));
+  TEST_ASSERT_EQUAL_INT(2, rad_feld(2134, REV, 3));
+  TEST_ASSERT_EQUAL_INT(3, rad_feld(2400, REV, 4));
+  // Der fortlaufende Zaehler laeuft weit ueber eine Umdrehung, auch negativ.
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(10 * REV + 1600, REV, 2));
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(-1, REV, 2));
+  TEST_ASSERT_EQUAL_INT(3, rad_feld(-1, REV, 4));
+}
+
+void test_rad_farben_der_felder() {
+  TEST_ASSERT_EQUAL_STRING("rot", farb_schluessel(rad_farbindex(0)));
+  TEST_ASSERT_EQUAL_STRING("blau", farb_schluessel(rad_farbindex(1)));
+  TEST_ASSERT_EQUAL_STRING("gruen", farb_schluessel(rad_farbindex(2)));
+  TEST_ASSERT_EQUAL_STRING("gelb", farb_schluessel(rad_farbindex(3)));
+}
+
+void test_rad_tempo_faellt_bis_null() {
+  const float v0 = 4.0f * REV;
+  TEST_ASSERT_FLOAT_WITHIN(1.0f, v0, rad_tempo(v0, 0, RAD_KONSTANT, RAD_ZAEH));
+  float davor = v0;
+  for (uint32_t t = 100; t < 30000; t += 100) {
+    const float v = rad_tempo(v0, t, RAD_KONSTANT, RAD_ZAEH);
+    TEST_ASSERT_TRUE(v <= davor);
+    davor = v;
+  }
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, davor);
+}
+
+void test_rad_mehr_schwung_laeuft_weiter() {
+  // Die Werte, die sich an der Hand richtig anfuehlen sollen: ein leichter
+  // Schubs bleibt unter einer Vierteldrehung, ein kraeftiger macht viele Runden.
+  TEST_ASSERT_TRUE(rad_weg(0.25f * REV) < 0.25f * REV);
+  TEST_ASSERT_TRUE(rad_weg(1.0f * REV) > 1.5f * REV);
+  TEST_ASSERT_TRUE(rad_weg(4.0f * REV) > 10.0f * REV);
+  TEST_ASSERT_TRUE(rad_weg(4.0f * REV) < 20.0f * REV);
+}
+
+void test_rad_ergebnis_ist_gleich_verteilt() {
+  // Der schwerste Fall: GENAU derselbe Wisch aus derselben Stellung. Nur die
+  // Streuung der Firmware mischt, und sie deckt nicht exakt ganze Umdrehungen
+  // ab - daher bis 56:44. Ein echter Wisch streut zusaetzlich mit der Hand.
+  const float wische[] = {1.5f, 2.5f, 4.0f};
+  uint32_t x = 12345;
+  for (float wisch : wische) {
+    for (int felder = RAD_FELDER_MIN; felder <= RAD_FELDER_MAX; felder++) {
+      int zaehler[RAD_FELDER_MAX] = {};
+      const int laeufe = 3000;
+      for (int i = 0; i < laeufe; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        const float v0 = rad_anfangstempo(wisch * REV, 4.0f * REV, 0.10f, x);
+        zaehler[rad_feld(static_cast<int32_t>(rad_weg(v0)), REV, felder)]++;
+      }
+      for (int f = 0; f < felder; f++)
+        TEST_ASSERT_FLOAT_WITHIN(0.06f, 1.0f / felder, static_cast<float>(zaehler[f]) / laeufe);
+    }
+  }
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
 
@@ -1845,7 +1959,8 @@ int main(int, char **) {
   RUN_TEST(test_feldbreite_aus_den_punkten);
 
   // --- Lichtautomatik-Einstellungen (27.09.2026) ---
-  RUN_TEST(test_weiss_ist_das_weiss_dieser_uhr);
+  RUN_TEST(test_farbnamen_kommen_aus_der_kalibrierung);
+  RUN_TEST(test_freie_farben_folgen_dem_kalibrierten_weiss);
   RUN_TEST(test_lichtautomatik_vorgaben_bleiben_unveraendert);
   RUN_TEST(test_lichtautomatik_klemmt_unsinn);
   RUN_TEST(test_einschaltschwelle_liegt_knapp_ueber_der_ausschaltschwelle);
@@ -1871,6 +1986,13 @@ int main(int, char **) {
   RUN_TEST(test_netze_json_staerkstes_zuerst_ohne_doppelte);
   RUN_TEST(test_netze_json_bleibt_unter_der_grenze);
   RUN_TEST(test_wlan_auftrag_lesen);
+
+  // --- Gluecksrad (05.11.2026) ---
+  RUN_TEST(test_rad_feld_ab_zwoelf_im_uhrzeigersinn);
+  RUN_TEST(test_rad_farben_der_felder);
+  RUN_TEST(test_rad_tempo_faellt_bis_null);
+  RUN_TEST(test_rad_mehr_schwung_laeuft_weiter);
+  RUN_TEST(test_rad_ergebnis_ist_gleich_verteilt);
 
   return UNITY_END();
 }

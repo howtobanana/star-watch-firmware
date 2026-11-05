@@ -252,6 +252,28 @@ class Betrieb {
   int32_t effekt_kreise() const { return effekt_kreise_; }
 
   // -------------------------------------------------------------------------
+  // Gluecksrad (05.11.2026)
+  // -------------------------------------------------------------------------
+  enum class Radphase : uint8_t { aus = 0, laeuft = 1, blinkt = 2 };
+
+  /// Den Zeiger anschubsen. `grad_je_s` ist das Tempo des Wischs, das Vorzeichen
+  /// die Richtung. Laeuft er schon, gibt das neuen Schwung in dieselbe Richtung.
+  /// @return nullptr, sonst der Grund, warum es nicht geht.
+  const char *rad_anschubsen(int felder, float grad_je_s, uint32_t zufall);
+  Radphase rad_phase() const { return rad_phase_; }
+  int rad_felder() const { return rad_felder_; }
+  int rad_feld_jetzt() const { return rad_feld_; }
+  /// Aktuelles Tempo in Schritten/s, rueckwaerts negativ. Fuer die Anzeige.
+  int32_t rad_tempo_jetzt() const { return rad_tempo_; }
+  /// Rueckwaerts gelaufen: das Riemenspiel raeumt nur eine Referenzfahrt weg
+  /// (die blockiert und gehoert deshalb nach main.cpp). Einmal true.
+  bool rad_referenz_abholen() {
+    const bool r = rad_referenz_;
+    rad_referenz_ = false;
+    return r;
+  }
+
+  // -------------------------------------------------------------------------
   // Einstellungen - AP 3.1, zwei NVS-Bereiche. Begruendung in betrieb.cpp.
   // -------------------------------------------------------------------------
 
@@ -310,12 +332,17 @@ class Betrieb {
   /// nur das eine hat, bekommt nicht das andere.
   const std::string &token() const { return token_; }
 
-  /// WEISS DIESER UHR als 0xRRGGBB (27.10.2026). Die drei LEDs streuen von
-  /// Uhr zu Uhr: an C4E8 ist 255/215/100 weiss, an BE40 100/255/150. Liegt im
-  /// Fertigungsbereich wie der Offset - es ist eine Eigenschaft der LED, keine
-  /// Vorliebe, und ueberlebt deshalb den Werksreset.
-  uint32_t weiss() const { return weiss_; }
-  void weiss(uint32_t rgb);
+  /// WERKSKALIBRIERUNG DER FARBEN (27.10.2026). Die drei LEDs streuen von
+  /// Uhr zu Uhr: an C4E8 ist 255/215/100 weiss, an BE40 100/255/150 - und mit
+  /// dem Weiss verschieben sich alle Mischfarben. Je feste Farbe ein Wert
+  /// (Reihenfolge farb_schluessel() in lib/zeiger). Liegt im
+  /// Fertigungsbereich wie der Offset: eine Eigenschaft der LED, keine
+  /// Vorliebe - ueberlebt Neustart, OTA und Werksreset.
+  const uint32_t *farb_kal() const { return kal_; }
+  uint32_t farb_kal(int i) const { return (i >= 0 && i < FARBEN_KAL) ? kal_[i] : 0; }
+  /// Setzen und speichern. `rgb` > 0xFFFFFF: zurueck auf die Vorgabe.
+  void farb_kal(int i, uint32_t rgb);
+  uint32_t weiss() const { return kal_[FARBEN_KAL - 1]; }
 
   /// Rueckfall in den Uhrbetrieb SOFORT statt nach der Frist - nach dem
   /// Steuern aus der App ('hu'), wo der Zeiger sonst zehn Sekunden auf zwoelf
@@ -514,6 +541,19 @@ class Betrieb {
   /// @return true, wenn dabei ein laufender Uhrbetrieb beendet wurde.
   bool hand_uebernimmt();
 
+  void rad_tick();
+  void rad_abbrechen();
+  void rad_farbe_zeigen(Muster m);
+  Radphase rad_phase_ = Radphase::aus;
+  int rad_felder_ = 0;
+  int rad_feld_ = -1;
+  int32_t rad_tempo_ = 0;
+  float rad_v0_ = 0.0f;
+  bool rad_vorwaerts_ = true;
+  bool rad_referenz_ = false;
+  uint32_t rad_ab_ms_ = 0;
+  uint32_t rad_takt_ms_ = 0;
+
   void uhr_stellen();
   void timer_tick();
   /// Die zwei Laufarten der Phase `laeuft`. Beide fahren nur vorwaerts.
@@ -535,7 +575,7 @@ class Betrieb {
   uint32_t uhr_letzter_tick_ = 0;
 
   int32_t hall_offset_ = 0;
-  uint32_t weiss_ = 0xFFD764;
+  uint32_t kal_[FARBEN_KAL] = {};
   // 0 heisst "noch nicht gesetzt". Den Startwert setzt beginn() aus geraet.h -
   // dieser Header bindet geraet.h bewusst NICHT ein, damit die Klasse nicht an
   // der Geraetekonfiguration haengt.
