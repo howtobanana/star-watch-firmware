@@ -1015,10 +1015,10 @@ Timer l&auml;uft.</p>
 <p class="hint">Schwung: volle Kreise vor dem Ziel. Fahrt dauert <b id="keff">&mdash;</b>.</p></div>
 
 <div class="k" id="k_rad"><h2>Gl&uuml;cksrad</h2>
-<div class="row"><span class="grp" style="flex:1">
-<button id="rad2" onclick="radWahl(2)">2</button><button id="rad3" onclick="radWahl(3)">3</button><button id="rad4" onclick="radWahl(4)">4</button>
-</span></div>
-<p class="hint" id="rad_m">Felder w&auml;hlen, dann das Zifferblatt anschubsen: Je schneller der Wisch, desto mehr Schwung.</p></div>
+<div class="row"><span class="sl"><span class="kz"><span class="lb">Felder</span><span class="tr">//</span><span class="w" id="rad_w">2</span></span>
+<input type="range" id="rad_z" min="2" max="30" step="1" value="2" style="--n:14" oninput="radZahl()"></span></div>
+<div class="row"><button id="rad_an" onclick="radWahl()">Einschalten</button></div>
+<p class="hint" id="rad_m">Einschalten, dann das Zifferblatt anschubsen: Je schneller der Wisch, desto mehr Schwung. Feld 1 beginnt auf zw&ouml;lf, weiter im Uhrzeigersinn.</p></div>
 
 </div></div>
 
@@ -1363,11 +1363,20 @@ function zeigerStellen(b,rev){
 // Rechnen tut die Uhr. Die Seite misst nur den Wisch und schickt sein Tempo.
 const RAD_FARBEN=[['rot','Rot'],['blau','Blau'],['gruen','Gr\u00fcn'],['gelb','Gelb']];
 let rad_n=0, rad_wisch=[], rad_stand=null, rad_timer=0, rad_ph=0;
-function radWahl(n){
- rad_n=rad_n===n?0:n;
- [2,3,4].forEach(x=>$('rad'+x).classList.toggle('an',x===rad_n));
+function radWahl(){
+ rad_n=rad_n?0:+$('rad_z').value;
+ $('rad_an').classList.toggle('an',rad_n>0);
+ $('rad_an').textContent=rad_n?'Ausschalten':'Einschalten';
  $('uhr').classList.toggle('rad',rad_n>0);
  radFelder();
+}
+function radZahl(){
+ $('rad_w').textContent=$('rad_z').value;
+ if(rad_n){rad_n=+$('rad_z').value;radFelder()}
+}
+// Dieselbe Reihenfolge wie rad_farbe in lib/zeiger.
+function radFarbe(i,n){
+ return n<=RAD_FARBEN.length?ledSicht(KAL[RAD_FARBEN[i][0]]):'hsl('+Math.floor(360*i/n)+',100%,50%)';
 }
 function radFelder(){
  // Unsichtbare Scheibe: ein SVG nimmt den Finger sonst nur auf einer gemalten
@@ -1375,8 +1384,8 @@ function radFelder(){
  let h=rad_n?'<circle cx="100" cy="100" r="100" fill="transparent" stroke="none"/>':'';
  for(let i=0;i<rad_n;i++){
   // Ein Stueck Luft an den Grenzen, sonst laufen die Boegen ineinander.
-  const von=i*3200/rad_n+16, bis=(i+1)*3200/rad_n-16;
-  h+='<path d="'+bogen(von,bis,3200,99)+'" stroke="'+ledSicht(KAL[RAD_FARBEN[i][0]])+
+  const luft=Math.min(16,320/rad_n), von=i*3200/rad_n+luft, bis=(i+1)*3200/rad_n-luft;
+  h+='<path d="'+bogen(von,bis,3200,99)+'" stroke="'+radFarbe(i,rad_n)+
      '" vector-effect="non-scaling-stroke"/>';
  }
  $('u_rad').innerHTML=h;
@@ -1425,7 +1434,7 @@ function radSehen(d){
  rad_stand=r.v?{b:d.blatt,v:r.v,t:performance.now(),rev:d.rev}:null;
  if(r.v&&!liefe)requestAnimationFrame(radZeichnen);
  if(r.ph&&!rad_timer)rad_timer=setTimeout(()=>{rad_timer=0;z()},250);
- d.rad_text=r.ph===1?'Gl\u00fccksrad l\u00e4uft':r.ph===2?RAD_FARBEN[r.feld][1]+' gewinnt':'';
+ d.rad_text=r.ph===1?'Gl\u00fccksrad l\u00e4uft':r.ph===2?(r.n<=RAD_FARBEN.length?RAD_FARBEN[r.feld][1]:'Feld '+(r.feld+1))+' gewinnt':'';
 }
 function blatt(d){
  const rev=d.rev;
@@ -2483,6 +2492,7 @@ String Testweb::zustand_json() {
   s += "\"ziel\":" + String(antrieb_->ziel()) + ",";
   s += "\"faehrt\":" + String(antrieb_->laeuft() ? "true" : "false") + ",";
   s += "\"rad\":{\"ph\":" + String(static_cast<int>(betrieb_->rad_phase())) +
+       ",\"n\":" + String(betrieb_->rad_felder()) +
        ",\"feld\":" + String(betrieb_->rad_feld_jetzt()) +
        ",\"v\":" + String(betrieb_->rad_tempo_jetzt()) + "},";
   s += "\"fuehrung\":\"" + String(wer) + "\",";

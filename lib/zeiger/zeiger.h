@@ -847,14 +847,18 @@ class Nachtschalter {
 // Uhrzeigersinn; bei zwei Feldern ist rechts Rot und links Blau.
 
 constexpr int RAD_FELDER_MIN = 2;
-constexpr int RAD_FELDER_MAX = 4;
+constexpr int RAD_FELDER_MAX = 30;
+/// Bis hierher hat jedes Feld eine benannte Farbe, darueber den Regenbogen.
+constexpr int RAD_FELDER_BENANNT = 4;
 
 /// Feld, in dem `position` liegt: 0 .. felder-1, ab zwoelf im Uhrzeigersinn.
 int rad_feld(int32_t position, int32_t rev, int felder);
 
-/// Farbe eines Felds: rot, blau, gruen, gelb. Als Index fuer farb_schluessel(),
-/// damit die Werkskalibrierung der Uhr gilt.
-int rad_farbindex(int feld);
+/// Farbe eines Felds. Bis RAD_FELDER_BENANNT rot, blau, gruen, gelb aus der
+/// Werkskalibrierung `kal` (FARBEN_KAL Eintraege). Darueber gleichmaessig ueber
+/// den Farbkreis, ueber das kalibrierte Weiss korrigiert: acht feste Farben
+/// reichen nicht, und wiederholte stuenden bei einem Vielfachen nebeneinander.
+uint32_t rad_farbe(int feld, int felder, const uint32_t *kal);
 
 /// Anfangstempo in Schritten/s aus dem Tempo des Wischs.
 ///

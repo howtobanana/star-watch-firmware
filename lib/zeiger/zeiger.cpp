@@ -1356,9 +1356,24 @@ int rad_feld(int32_t position, int32_t rev, int felder) {
   return static_cast<int>(static_cast<int64_t>(normiere(position, rev)) * felder / rev);
 }
 
-int rad_farbindex(int feld) {
-  static const char *const NAMEN[RAD_FELDER_MAX] = {"rot", "blau", "gruen", "gelb"};
-  return farb_index(NAMEN[feld >= 0 && feld < RAD_FELDER_MAX ? feld : 0]);
+uint32_t rad_farbe(int feld, int felder, const uint32_t *kal) {
+  if (felder <= RAD_FELDER_BENANNT) {
+    static const char *const NAMEN[RAD_FELDER_BENANNT] = {"rot", "blau", "gruen", "gelb"};
+    return kal[farb_index(NAMEN[feld >= 0 && feld < RAD_FELDER_BENANNT ? feld : 0])];
+  }
+  // Farbton bei voller Saettigung: in sechs Abschnitten steigt oder faellt ein Kanal.
+  const int h = feld * 1530 / felder;  // 6 * 255
+  const int x = h % 255;
+  uint32_t r = 0, g = 0, b = 0;
+  switch (h / 255) {
+    case 0: r = 255; g = x; break;
+    case 1: r = 255 - x; g = 255; break;
+    case 2: g = 255; b = x; break;
+    case 3: g = 255 - x; b = 255; break;
+    case 4: r = x; b = 255; break;
+    default: r = 255; b = 255 - x; break;
+  }
+  return farbe_korrigiert(r << 16 | g << 8 | b, kal[FARBEN_KAL - 1]);
 }
 
 float rad_anfangstempo(float wunsch, float tempo_max, float streuung, uint32_t zufall) {

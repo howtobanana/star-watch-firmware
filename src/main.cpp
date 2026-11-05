@@ -1072,7 +1072,7 @@ void kommando(char *z) {
       int felder = 0;
       float grad = 0.0f;
       if (sscanf(rest, "%d %f", &felder, &grad) != 2) {
-        starwatch::konsole.println("R <felder 2..4> <grad/s>  Gluecksrad anschubsen, - = rueckwaerts");
+        starwatch::konsole.println("R <felder 2..30> <grad/s>  Gluecksrad anschubsen, - = rueckwaerts");
         return;
       }
       const char *grund = betrieb.rad_anschubsen(felder, grad, esp_random());

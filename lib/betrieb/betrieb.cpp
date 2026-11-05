@@ -1084,7 +1084,7 @@ const char *Betrieb::rad_anschubsen(int felder, float grad_je_s, uint32_t zufall
   if (antrieb_ == nullptr || licht_ == nullptr)
     return "kein Antrieb";
   if (felder < RAD_FELDER_MIN || felder > RAD_FELDER_MAX)
-    return "2, 3 oder 4 Felder";
+    return "2 bis 30 Felder";
   if (!referenz_gueltig_)
     return "ohne Referenz waere das Feld geraten";
   if (homing_laeuft_)
@@ -1114,7 +1114,7 @@ const char *Betrieb::rad_anschubsen(int felder, float grad_je_s, uint32_t zufall
 }
 
 void Betrieb::rad_farbe_zeigen(Muster m) {
-  licht_->signal(Licht::Ebene::zustand, kal_[rad_farbindex(rad_feld_)], m, -1.0f, 0);
+  licht_->signal(Licht::Ebene::zustand, rad_farbe(rad_feld_, rad_felder_, kal_), m, -1.0f, 0);
 }
 
 void Betrieb::rad_tick() {

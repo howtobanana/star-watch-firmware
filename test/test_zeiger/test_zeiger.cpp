@@ -1753,13 +1753,24 @@ void test_rad_feld_ab_zwoelf_im_uhrzeigersinn() {
   TEST_ASSERT_EQUAL_INT(1, rad_feld(10 * REV + 1600, REV, 2));
   TEST_ASSERT_EQUAL_INT(1, rad_feld(-1, REV, 2));
   TEST_ASSERT_EQUAL_INT(3, rad_feld(-1, REV, 4));
+  TEST_ASSERT_EQUAL_INT(29, rad_feld(-1, REV, 30));
+  TEST_ASSERT_EQUAL_INT(0, rad_feld(106, REV, 30));
+  TEST_ASSERT_EQUAL_INT(1, rad_feld(107, REV, 30));
 }
 
 void test_rad_farben_der_felder() {
-  TEST_ASSERT_EQUAL_STRING("rot", farb_schluessel(rad_farbindex(0)));
-  TEST_ASSERT_EQUAL_STRING("blau", farb_schluessel(rad_farbindex(1)));
-  TEST_ASSERT_EQUAL_STRING("gruen", farb_schluessel(rad_farbindex(2)));
-  TEST_ASSERT_EQUAL_STRING("gelb", farb_schluessel(rad_farbindex(3)));
+  uint32_t kal[FARBEN_KAL];
+  for (int i = 0; i < FARBEN_KAL; i++)
+    kal[i] = farb_vorgabe(i);
+  // Bis vier: die benannten Farben aus der Kalibrierung dieser Uhr.
+  TEST_ASSERT_EQUAL_HEX32(kal[farb_index("rot")], rad_farbe(0, 2, kal));
+  TEST_ASSERT_EQUAL_HEX32(kal[farb_index("blau")], rad_farbe(1, 2, kal));
+  TEST_ASSERT_EQUAL_HEX32(kal[farb_index("gruen")], rad_farbe(2, 4, kal));
+  TEST_ASSERT_EQUAL_HEX32(kal[farb_index("gelb")], rad_farbe(3, 4, kal));
+  // Darueber: Nachbarn unterscheiden sich immer, auch ueber zwoelf hinweg.
+  for (int felder = RAD_FELDER_BENANNT + 1; felder <= RAD_FELDER_MAX; felder++)
+    for (int f = 0; f < felder; f++)
+      TEST_ASSERT_TRUE(rad_farbe(f, felder, kal) != rad_farbe((f + 1) % felder, felder, kal));
 }
 
 void test_rad_tempo_faellt_bis_null() {
@@ -1790,7 +1801,7 @@ void test_rad_ergebnis_ist_gleich_verteilt() {
   const float wische[] = {1.5f, 2.5f, 4.0f};
   uint32_t x = 12345;
   for (float wisch : wische) {
-    for (int felder = RAD_FELDER_MIN; felder <= RAD_FELDER_MAX; felder++) {
+    for (int felder : {2, 3, 4, 7, 30}) {
       int zaehler[RAD_FELDER_MAX] = {};
       const int laeufe = 3000;
       for (int i = 0; i < laeufe; i++) {
@@ -1801,7 +1812,8 @@ void test_rad_ergebnis_ist_gleich_verteilt() {
         zaehler[rad_feld(static_cast<int32_t>(rad_weg(v0)), REV, felder)]++;
       }
       for (int f = 0; f < felder; f++)
-        TEST_ASSERT_FLOAT_WITHIN(0.06f, 1.0f / felder, static_cast<float>(zaehler[f]) / laeufe);
+        // Feste Grenze, aber bei vielen Feldern hoechstens das Doppelte des Solls.
+        TEST_ASSERT_FLOAT_WITHIN(felder > 12 ? 1.0f / felder : 0.06f, 1.0f / felder, static_cast<float>(zaehler[f]) / laeufe);
     }
   }
 }
