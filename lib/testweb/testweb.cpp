@@ -192,12 +192,6 @@ int log_steurer = -1;
 uint32_t log_gesteuert_ms = 0;
 constexpr uint32_t LOG_FREMD_MS = 1500;
 
-bool log_jemand_da() {
-  for (auto &p : log_plaetze)
-    if (p.c && p.c.connected())
-      return true;
-  return false;
-}
 
 // ===========================================================================
 // EIGENER NAME AM ZUGANGSPUNKT: http://star.watch
@@ -245,10 +239,9 @@ constexpr wifi_power_t SENDELEISTUNG_GEDROSSELT = WIFI_POWER_11dBm;
 // Haltestrom der groesste Verbraucher. MIT Stromsparen (Modem-Sleep) brachen
 // am 28.09.2026 OTA-Uploads bei 40 % ab, und die Oberflaeche wurde traege.
 // Deshalb: wach, solange jemand da ist - jede Anfrage, ein Telnet-Client,
-// jedes Update -, und erst FUNK_WACH_MS nach der letzten Bedienung schlafen.
+// jedes Update -, und erst 5 min nach der letzten Bedienung schlafen.
+// ABGELOEST 07.11.2026 (STAR-73): der Funk ist IMMER wach, siehe tick().
 // MQTT und NTP laufen im Schlaf weiter, nur mit etwas mehr Verzoegerung.
-constexpr uint32_t FUNK_WACH_MS = 5u * 60u * 1000u;
-uint32_t letzte_bedienung_ms = 0;
 bool funk_schlaeft = false;
 // Fuer die Diagnose: wie lange er geschlafen hat. Von aussen ist das nicht zu
 // sehen - jede Anfrage weckt ihn, bevor sie beantwortet wird.
@@ -3197,14 +3190,6 @@ void Testweb::log_platz_tick(int nr, const String &jetzt) {
 }
 
 void Testweb::routen_setzen() {
-  // JEDE Anfrage zaehlt als Bedienung und weckt den Funk (siehe funk_wach).
-  // Die erste nach dem Schlaf ist dadurch nur einmal etwas langsamer.
-  server.addMiddleware([](WebServer &s, Middleware::Callback weiter) {
-    (void)s;
-    letzte_bedienung_ms = millis();
-    funk_wach(true);
-    return weiter();
-  });
 
   // SCHUTZ VOR FREMDEN SEITEN: jede Route geht durch waechter() - lesende mit
   // false (nur der Host wird geprueft), aendernde mit true (POST, Kopfzeile
@@ -4218,14 +4203,11 @@ void Testweb::tick() {
     return;
   }
 
-  // Wach bleiben, solange jemand da ist; sonst nach FUNK_WACH_MS schlafen.
-  // Nur im Heimnetz: als Zugangspunkt muss der Funk ohnehin wach sein.
-  {
-    const bool jemand_da = update_laeuft || log_jemand_da() ||
-                           millis() - letzte_bedienung_ms < FUNK_WACH_MS ||
-                           WiFi.getMode() != WIFI_STA;
-    funk_wach(jemand_da);
-  }
+  // IMMER WACH (STAR-73, 07.11.2026, Fabians Entscheidung): im Schlaf gingen
+  // die ersten Anfragen verloren - App, Home Assistant und Oberflaeche sahen
+  // die Uhr sekundenlang als "nicht erreichbar". Kostet ~80 mA bei 3,3 V
+  // (~0,26 W); eine Wanduhr am Netzteil ist immer erreichbar wie Hue/Shelly.
+  funk_wach(true);
   server.handleClient();
   if (dns_laeuft)
     dns.processNextRequest();
