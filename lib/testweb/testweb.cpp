@@ -3180,7 +3180,7 @@ void Testweb::log_platz_tick(int nr, const String &jetzt) {
         len = 0;
         zu_lang = false;
       }
-    } else if (len < sizeof(puffer) - 1) {
+    } else if (len < sizeof(p.puffer) - 1) {  // NICHT sizeof(puffer): das ist hier ein Zeiger
       puffer[len++] = c;
     } else {
       zu_lang = true;  // bis zum Zeilenende weiterlesen, dann melden
