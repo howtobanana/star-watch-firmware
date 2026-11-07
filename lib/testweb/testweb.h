@@ -284,6 +284,7 @@ class Testweb {
 
  private:
   void log_tick();
+  void log_platz_tick(int nr, const String &jetzt);
   void dns_starten();
   void dns_beenden();
   void routen_setzen();

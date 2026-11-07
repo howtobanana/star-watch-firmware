@@ -169,13 +169,35 @@ uint32_t neustart_ab_ms = 0;
 bool neustart_mit_reset = false;
 constexpr uint32_t NEUSTART_FRIST_MS = 2000;
 
-/// Log ueber TCP. Ein Zuhoerer genuegt.
+/// Log ueber TCP, MEHRERE ZUHOERER (STAR-60): mehrere iPhones duerfen
+/// gleichzeitig verbunden sein - kein Hauptnutzer, der letzte Befehl gewinnt.
+/// Bis 0.32 gab es einen Platz, und das zweite iPhone warf das erste hinaus.
+/// Drei Plaetze: der C3 hat wenige Sockets, und der Webserver braucht auch welche.
 WiFiServer log_server(Testweb::LOG_PORT);
-WiFiClient log_client;
-size_t log_gesendet = 0;
-/// Hat sich der Zuhoerer am Log-Port mit dem Token angemeldet? Faellt mit
-/// jeder neuen Verbindung zurueck.
-bool log_befugt = false;
+struct LogPlatz {
+  WiFiClient c;
+  size_t gesendet = 0;
+  /// Mit dem Token angemeldet? Faellt mit jeder neuen Verbindung zurueck.
+  bool befugt = false;
+  char puffer[g::KOMMANDO_MAX];
+  size_t len = 0;
+  bool zu_lang = false;
+  /// Letzte Eingabe - ein voller Port loest die am laengsten stille ab.
+  uint32_t zuletzt_ms = 0;
+};
+constexpr int LOG_PLAETZE = 3;
+LogPlatz log_plaetze[LOG_PLAETZE];
+/// Wer zuletzt mit 'ps' gesteuert hat, fuer den Hinweis in den anderen Apps.
+int log_steurer = -1;
+uint32_t log_gesteuert_ms = 0;
+constexpr uint32_t LOG_FREMD_MS = 1500;
+
+bool log_jemand_da() {
+  for (auto &p : log_plaetze)
+    if (p.c && p.c.connected())
+      return true;
+  return false;
+}
 
 // ===========================================================================
 // EIGENER NAME AM ZUGANGSPUNKT: http://star.watch
@@ -789,8 +811,8 @@ Neustart weiter, damit die Adresse ablesbar bleibt.</p></div>
 <span class="sl"><span class="kz"><span class="lb">Licht</span>
 <span class="tr">//</span><span class="w" id="sl_hell_w">&mdash;</span></span>
 <input type="range" id="sl_hell" min="0" max="100" step="1" style="--n:4"
- oninput="$('sl_hell_w').textContent=this.value+' %'"
- onchange="c('l '+this.value)"></span>
+ oninput="$('sl_hell_w').textContent=this.value+' %';hell(this.value)"
+ onchange="hell(this.value,1)"></span>
 <span class="uhrzeit" id="bar_uhr" style="margin-left:auto">--:--</span>
 <!-- EIN Knopf statt zweier Reiter. Er zeigt, WOHIN er fuehrt: im Uhrbild das
      Zahnrad, in den Einstellungen die Uhr. Zurueck geht es auch ueber
@@ -876,11 +898,15 @@ M3.5 3.5l1.6 1.6M14.9 14.9l1.6 1.6M16.5 3.5l-1.6 1.6M5.1 14.9l-1.6 1.6"/></svg>
       app/.../Zifferblatt.swift. Umriss
       wie alles andere; gefuellt mit der Hintergrundfarbe, damit der Hof der
       Klinge nicht durch den Griff scheint. -->
- <g id="u_griff" fill="none" stroke-width="1">
-  <path d="M97.5 114.4 L102.5 114.4 L103.14 113.7 L103.14 106.3 L102.5 105.6 L102.97 105.6 L102.97 88.1 L97.03 85 L97.03 105.6 L97.5 105.6 L96.86 106.3 L96.86 113.7 Z"
-        fill="var(--bg)" stroke="var(--w3)" vector-effect="non-scaling-stroke"/>
-  <path d="M96.86 113.7 H103.14 M96.86 106.3 H103.14 M98.8 113.2 V106.8 M101.2 113.2 V106.8 M97.03 94.2 H102.97 M97.03 93.2 H102.97 M97.03 92.2 H102.97"
-        stroke="var(--w4)" vector-effect="non-scaling-stroke"/>
+ <!-- DER GRIFF NACH FABIANS CAD-ANSICHT (STAR-56, 07.11.2026): Muendung
+      schraeg, zwei Ringe, Hals, Manschette mit Schaltkasten und drei Knoepfen,
+      gerippter Knauf. Deckende Grautoene statt durchsichtigem Weiss - sonst
+      schien der Hof durch die Linien. Gleiche Zahlen in Zifferblatt.swift. -->
+ <g id="u_griff" fill="none" stroke-width="1" stroke-linejoin="round" stroke-linecap="round">
+  <path d="M97.53 114.09 L102.47 114.09 L103.35 113.2 L103.35 105.85 L102.73 104.94 L102.73 102.88 L102.97 102.88 L102.97 96.58 L102.73 96.58 L102.73 94.27 L102.55 94.27 L102.55 93.73 L102.97 93.73 L102.97 93.24 L102.55 93.24 L102.55 92.76 L102.97 92.76 L102.97 92.27 L102.55 92.27 L102.55 91.73 L102.97 91.73 L102.97 84.7 L97.03 87.97 L97.03 91.73 L97.45 91.73 L97.45 92.27 L97.03 92.27 L97.03 92.76 L97.45 92.76 L97.45 93.24 L97.03 93.24 L97.03 93.73 L97.45 93.73 L97.45 94.27 L97.27 94.27 L97.27 96.58 L97.03 96.58 L97.03 102.88 L97.27 102.88 L97.27 104.94 L96.65 105.85 L96.65 113.2 Z M97.03 97.18 L96.4 97.18 L96.4 101.67 L97.03 102.27 Z M96.4 98.15 L96.12 98.15 L96.12 98.65 L96.4 98.65 Z M96.4 99.15 L96.12 99.15 L96.12 99.65 L96.4 99.65 Z M96.4 100.15 L96.12 100.15 L96.12 100.65 L96.4 100.65 Z"
+        fill="var(--bg)" stroke="#a6a6a6" vector-effect="non-scaling-stroke"/>
+  <path d="M97.03 102.52 L102.97 102.52 M97.03 96.94 L102.97 96.94 M96.65 113.2 L103.35 113.2 M96.65 105.85 L103.35 105.85 M97.7 113 L97.7 106.05 M99 113 L99 106.05 M101 113 L101 106.05 M102.3 113 L102.3 106.05"
+        stroke="#5c5c5c" vector-effect="non-scaling-stroke"/>
  </g>
  <!-- KEIN KREIS MEHR IN DER MITTE (23.10.2026): der Drehpunkt liegt im
       Griff, und der Griff zeigt ihn - Kreis und Rechteck darueber waren
@@ -1276,6 +1302,10 @@ function tokLoeschen(){tok='';localStorage.removeItem('sw_tok');
  $('tokm').textContent='Vergessen.'}
 
 function c(k){post('/test/cmd',{k:k}).then(t)}
+// Helligkeit beim Ziehen laufend senden, hoechstens alle 150 ms - die Klinge
+// folgt dem Finger statt beim Loslassen zu springen (STAR-25).
+let hell_zuletzt=0;
+function hell(v,ende){const j=Date.now(); if(ende||j-hell_zuletzt>150){hell_zuletzt=j; post('/test/cmd',{k:'l '+v});}}
 // EINMESSEN: "Auf zwoelf" haelt den Zeiger, bis "Hier ist zwoelf" kommt.
 // Gruen wird "Hier ist zwoelf", und erst, wenn die Uhr das o! angenommen
 // hat - nicht beim Klick. Danach faehrt die Uhr von selbst zur Uhrzeit.
@@ -1489,8 +1519,10 @@ function blatt(d){
  const kern=hofrgb ? (()=>{const n=parseInt(hofrgb.slice(1),16);
    const m=x=>Math.round(255-(255-x)*0.14);
    return 'rgb('+m(n>>16&255)+','+m(n>>8&255)+','+m(n&255)+')'})() : 'hsl(0,60%,93%)';
- $('u_zeiger').setAttribute('stroke', brennt ? kern : 'rgba(255,255,255,.55)');
- $('u_zeiger').style.opacity = brennt ? (0.42+p*0.0058).toFixed(3) : 1;
+ // DECKEND (STAR-56): eine halb durchsichtige Klinge sah aus wie Glas vor
+ // dem Hof. Die Helligkeit zeigt der Hof allein.
+ $('u_zeiger').setAttribute('stroke', brennt ? kern : '#8c8c8c');
+ $('u_zeiger').style.opacity = 1;
  // DER SCHEIN. Drei Groessen wachsen mit der Helligkeit, und alle drei
  // muessen es: nur heller waere ein Aufkleber, nur breiter waere Nebel.
  // Die Zahlen sind nicht geraten - drei Abstufungen wurden als Bild
@@ -1981,8 +2013,10 @@ function z(){fetch('/test/zustand').then(r=>r.json()).then(d=>{
   // umstellt, hat damit eine passende Vorlage statt leerer Felder.
   ['ip','maske','gw','dns'].forEach(k=>$('wl_'+k).value=d['wl_'+k]||'');
  }
- stelle('sl_hell',  e=>{e.value=Math.round(d.licht_aus_proz);
-                        $('sl_hell_w').textContent=Math.round(d.licht_aus_proz)+' %'});
+ // Den eingestellten Wert, nicht die gedimmte Ausgabe (STAR-25).
+ const hs=d.licht_soll!=null?d.licht_soll:d.licht_aus_proz;
+ stelle('sl_hell',  e=>{e.value=Math.round(hs);
+                        $('sl_hell_w').textContent=Math.round(hs)+' %'});
  stelle('sl_tempo', e=>{const u=Math.round(d.tempo/d.rev);e.value=u;
                         $('sl_tempo_w').textContent=u+' U/s'});
  stelle('sl_kreise',e=>{e.value=d.kreise;
@@ -2575,6 +2609,8 @@ String Testweb::zustand_json() {
   // Helligkeit faerben koennen, ohne einen Satz zu zerlegen.
   s += "\"licht_an\":" + String(licht_->ist_an() ? "true" : "false") + ",";
   s += "\"licht_aus_proz\":" + String(licht_->ausgabe_prozent(), 1) + ",";
+  // Reglerwert ohne Automatik und Ueberblenden (STAR-25) - fuer Seite und App.
+  s += "\"licht_soll\":" + String(licht_->soll_prozent(), 1) + ",";
   {
     char farbe[8];
     snprintf(farbe, sizeof(farbe), "#%06lx", (unsigned long)licht_->farbe());
@@ -3031,36 +3067,55 @@ void Testweb::dns_beenden() {
 }
 
 void Testweb::log_tick() {
-  // Neuen Zuhoerer annehmen. Nur einer: der bestehende wird abgeloest, sonst
-  // haengt eine tote Verbindung den Port dauerhaft zu.
+  // Neuen Zuhoerer annehmen: freier Platz, sonst der am laengsten stille -
+  // eine tote Verbindung darf den Port nicht dauerhaft zuhaengen.
   if (log_server.hasClient()) {
-    if (log_client)
-      log_client.stop();
-    log_client = log_server.available();
-    log_gesendet = konsole.log().length();  // nicht die ganze Vorgeschichte
-    log_befugt = false;                     // jede Verbindung faengt von vorn an
-    log_client.println("\n--- Star Watch, Log ueber Netz. Eingaben gehen an die "
-                       "Konsole. ---");
+    int frei = 0;
+    for (int i = 0; i < LOG_PLAETZE; i++) {
+      if (!log_plaetze[i].c || !log_plaetze[i].c.connected()) { frei = i; break; }
+      if (log_plaetze[i].zuletzt_ms < log_plaetze[frei].zuletzt_ms) frei = i;
+    }
+    LogPlatz &p = log_plaetze[frei];
+    if (p.c)
+      p.c.stop();
+    p.c = log_server.available();
+    p.gesendet = konsole.log().length();  // nicht die ganze Vorgeschichte
+    p.befugt = false;                     // jede Verbindung faengt von vorn an
+    p.len = 0;
+    p.zu_lang = false;
+    p.zuletzt_ms = millis();
+    if (log_steurer == frei)
+      log_steurer = -1;
+    p.c.println("\n--- Star Watch, Log ueber Netz. Eingaben gehen an die "
+                "Konsole. ---");
   }
-  if (!log_client || !log_client.connected())
+  const String jetzt = konsole.log();
+  for (int i = 0; i < LOG_PLAETZE; i++)
+    log_platz_tick(i, jetzt);
+}
+
+void Testweb::log_platz_tick(int nr, const String &jetzt) {
+  LogPlatz &p = log_plaetze[nr];
+  if (!p.c || !p.c.connected())
     return;
+  WiFiClient &log_client = p.c;
 
   // Was seit dem letzten Mal dazugekommen ist, nachschicken.
-  const String jetzt = konsole.log();
-  if (jetzt.length() > log_gesendet) {
-    log_client.print(jetzt.substring(log_gesendet));
-    log_gesendet = jetzt.length();
-  } else if (jetzt.length() < log_gesendet) {
-    log_gesendet = jetzt.length();  // Ringpuffer ist umgelaufen oder geleert
+  if (jetzt.length() > p.gesendet) {
+    log_client.print(jetzt.substring(p.gesendet));
+    p.gesendet = jetzt.length();
+  } else if (jetzt.length() < p.gesendet) {
+    p.gesendet = jetzt.length();  // Ringpuffer ist umgelaufen oder geleert
   }
 
   // Eingaben von dort wie Konsoleneingaben behandeln - dieselbe Regel wie
   // ueberall: alle Wege fuehren dieselben Kommandos aus.
   while (log_client.available()) {
-    static char puffer[g::KOMMANDO_MAX];
-    static size_t len = 0;
-    static bool zu_lang = false;
+    char *puffer = p.puffer;
+    size_t &len = p.len;
+    bool &zu_lang = p.zu_lang;
     const char c = log_client.read();
+    p.zuletzt_ms = millis();
     if (c == '\r' || c == '\n') {
       if (len > 0) {
         puffer[len] = '\0';
@@ -3072,11 +3127,11 @@ void Testweb::log_tick() {
           // dieser Weg fast uebersehen worden: Port 23 fuehrt Kommandos aus
           // und war voellig offen - er ist damit genauso maechtig wie
           // /test/cmd, nur ohne Tuer.
-          log_befugt = (betrieb_zeiger != nullptr &&
+          p.befugt = (betrieb_zeiger != nullptr &&
                         String(puffer + 6) == betrieb_zeiger->token().c_str());
-          log_client.println(log_befugt ? "Token gilt. Kommandos frei."
+          log_client.println(p.befugt ? "Token gilt. Kommandos frei."
                                         : "Token stimmt nicht.");
-        } else if (log_befugt || (aktiv != nullptr && aktiv->eigener_ap() &&
+        } else if (p.befugt || (aktiv != nullptr && aktiv->eigener_ap() &&
                                   !aktiv->offener_ap())) {
           // 'pz' IST KEIN KOMMANDO, SONDERN EINE FRAGE, und sie wird hier
           // beantwortet statt in main.cpp - weil die Antwort NUR an den
@@ -3093,12 +3148,15 @@ void Testweb::log_tick() {
             if (antrieb_ != nullptr)
               // Ab 0.31.0 dahinter das Gluecksrad: Tempo, Phase, Feld - und was
               // die Klinge zeigt, denn die Anzeige muss der Farbe im Lauf folgen.
-              log_client.printf("#p %ld %ld %ld %d %d %06lx %d\n", (long)antrieb_->position(),
+              // Ab 0.32.1 als neuntes Feld: steuert gerade ein ANDERES Geraet (STAR-60)?
+              log_client.printf("#p %ld %ld %ld %d %d %06lx %d %d\n", (long)antrieb_->position(),
                                 (long)antrieb_->ziel(), (long)betrieb_->rad_tempo_jetzt(),
                                 static_cast<int>(betrieb_->rad_phase()),
                                 betrieb_->rad_feld_jetzt(),
                                 (unsigned long)licht_->zeige_farbe(),
-                                static_cast<int>(licht_->zeige_prozent()));
+                                static_cast<int>(licht_->zeige_prozent()),
+                                (log_steurer >= 0 && log_steurer != nr &&
+                                 millis() - log_gesteuert_ms < LOG_FREMD_MS) ? 1 : 0);
             len = 0;
             zu_lang = false;
             continue;
@@ -3106,8 +3164,12 @@ void Testweb::log_tick() {
           // 'ps' kommt beim Steuern mehrmals je Sekunde (siehe main.cpp):
           // mitgeschrieben wuerde es die Verbindung mit der Antwort auf die
           // eigenen Befehle fluten.
-          if (!(puffer[0] == 'p' && puffer[1] == 's'))
+          if (puffer[0] == 'p' && puffer[1] == 's') {
+            log_steurer = nr;
+            log_gesteuert_ms = millis();
+          } else {
             konsole.printf("\n[netz] %s\n", puffer);
+          }
           ausfuehren(puffer);
         } else {
           log_client.println(
@@ -4151,7 +4213,7 @@ void Testweb::tick() {
   // Wach bleiben, solange jemand da ist; sonst nach FUNK_WACH_MS schlafen.
   // Nur im Heimnetz: als Zugangspunkt muss der Funk ohnehin wach sein.
   {
-    const bool jemand_da = update_laeuft || (log_client && log_client.connected()) ||
+    const bool jemand_da = update_laeuft || log_jemand_da() ||
                            millis() - letzte_bedienung_ms < FUNK_WACH_MS ||
                            WiFi.getMode() != WIFI_STA;
     funk_wach(jemand_da);
