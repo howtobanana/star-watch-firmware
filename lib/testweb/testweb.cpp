@@ -922,12 +922,12 @@ M3.5 3.5l1.6 1.6M14.9 14.9l1.6 1.6M16.5 3.5l-1.6 1.6M5.1 14.9l-1.6 1.6"/></svg>
 <div class="row"><span class="sl"><span class="kz"><span class="lb">Blau</span><span class="tr">//</span><span class="w" id="fb_w">&mdash;</span></span>
 <input type="range" id="fb" min="0" max="255" step="1" style="--n:4;--pk:#3a7bff" oninput="farbRegler()"></span></div>
 <div class="row"><span class="grp fa5">
-<button id="fa_rot" title="Rot" aria-label="Rot" onclick="farbeSetzen(KAL.rot)"><span class="fp" style="background:#ff0000"></span><span class="fw">Rot</span></button>
-<button id="fa_gruen" title="Gr&uuml;n" aria-label="Gr&uuml;n" onclick="farbeSetzen(KAL.gruen)"><span class="fp" style="background:#00ff00"></span><span class="fw">Gr&uuml;n</span></button>
-<button id="fa_blau" title="Blau" aria-label="Blau" onclick="farbeSetzen(KAL.blau)"><span class="fp" style="background:#0014ff"></span><span class="fw">Blau</span></button>
-<button id="fa_gelb" title="Gelb" aria-label="Gelb" onclick="farbeSetzen(KAL.gelb)"><span class="fp" style="background:#ff6e00"></span><span class="fw">Gelb</span></button>
-<button id="fa_violett" title="Violett" aria-label="Violett" onclick="farbeSetzen(KAL.violett)"><span class="fp" style="background:#9b00ff"></span><span class="fw">Violett</span></button>
-<button id="fa_weiss" title="Wei&szlig;" aria-label="Wei&szlig;" onclick="farbeSetzen(KAL.weiss)"><span class="fp" style="background:#ffd764"></span><span class="fw">Wei&szlig;</span></button>
+<button id="fa_rot" title="Rot" aria-label="Rot" onclick="farbeSetzen(KAL.rot)"><span class="fp" style="background:#ff2929"></span><span class="fw">Rot</span></button>
+<button id="fa_gruen" title="Gr&uuml;n" aria-label="Gr&uuml;n" onclick="farbeSetzen(KAL.gruen)"><span class="fp" style="background:#2bff4f"></span><span class="fw">Gr&uuml;n</span></button>
+<button id="fa_blau" title="Blau" aria-label="Blau" onclick="farbeSetzen(KAL.blau)"><span class="fp" style="background:#2e6bff"></span><span class="fw">Blau</span></button>
+<button id="fa_gelb" title="Gelb" aria-label="Gelb" onclick="farbeSetzen(KAL.gelb)"><span class="fp" style="background:#ffd61a"></span><span class="fw">Gelb</span></button>
+<button id="fa_violett" title="Violett" aria-label="Violett" onclick="farbeSetzen(KAL.violett)"><span class="fp" style="background:#a33dff"></span><span class="fw">Violett</span></button>
+<button id="fa_weiss" title="Wei&szlig;" aria-label="Wei&szlig;" onclick="farbeSetzen(KAL.weiss)"><span class="fp" style="background:#ffffff"></span><span class="fw">Wei&szlig;</span></button>
 </span></div>
 <details><summary>Werkskalibrierung</summary>
 <p class="hint">Die LEDs streuen von Uhr zu Uhr. Hier wird jede feste Farbe f&uuml;r
@@ -1515,7 +1515,7 @@ function blatt(d){
  // Der Hof traegt die eingestellte Farbe, der Kern bleibt nahezu weiss mit
  // einem Hauch davon - wie oben begruendet.
  const fz=d.zeige_farbe||d.farbe;
- const hofrgb=/^#[0-9a-f]{6}$/i.test(fz||'') ? ledSicht(fz) : null;
+ const hofrgb=/^#[0-9a-f]{6}$/i.test(fz||'') ? sicht(fz) : null;
  const kern=hofrgb ? (()=>{const n=parseInt(hofrgb.slice(1),16);
    const m=x=>Math.round(255-(255-x)*0.14);
    return 'rgb('+m(n>>16&255)+','+m(n>>8&255)+','+m(n&255)+')'})() : 'hsl(0,60%,93%)';
@@ -1879,8 +1879,16 @@ function farbAnzeigen(hex,regler){const n=parseInt(hex,16),k=[n>>16&255,n>>8&255
  ['rot','gruen','blau','gelb','violett','weiss'].forEach(x=>$('fa_'+x).classList.toggle('an',KAL[x]===hex.toLowerCase()))}
 // Senden ohne Log-Nachladen: waehrend des Ziehens kaemen sonst Dutzende
 // Anfragen. Hoechstens alle 250 ms, und der LETZTE Wert geht immer raus.
+// BILDSCHIRMFARBEN (STAR-63): die Knoepfe zeigen, wie die Farbe heisst, nicht
+// den LED-Wert - "gelb" ist an der LED #ff6e00 und sah hier orange aus. Gleiche
+// Werte wie die App (Gemeinsam/Farbe.swift, Color.sichtFarben).
+const SICHT={rot:'#ff2929',gruen:'#2bff4f',blau:'#2e6bff',gelb:'#ffd61a',violett:'#a33dff',weiss:'#ffffff'};
+// Eine kalibrierte Klingenfarbe als Bildschirmfarbe, sonst die LED-Umrechnung.
+function sicht(hex){const h=String(hex||'').replace('#','').toLowerCase();  // KAL ohne '#'
+ for(const k in SICHT) if(KAL[k]===h) return SICHT[k];
+ return ledSicht(hex)}
 function farbFelder(){document.querySelectorAll('#k_farbe button[id^="fa_"] .fp').forEach(e=>{
- const k=KAL[e.parentNode.id.slice(3)];if(k)e.style.background=ledSicht(k)})}
+ const k=SICHT[e.parentNode.id.slice(3)];if(k)e.style.background=k})}
 farbFelder();
 // Knopf: mit Zuendung ('lf'). Regler: ohne ('lfr') - er schickt beim Ziehen
 // alle 250 ms einen Wert, und jeder wuerde die Zuendung neu anfangen lassen.
